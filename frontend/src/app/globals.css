@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+:root {
+  --background: #07060d;
+  --foreground: #ededed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  background-color: var(--background);
+  /* Layered radial "aurora" glows behind everything. */
+  background-image:
+    radial-gradient(60rem 60rem at 12% -10%, rgba(139, 92, 246, 0.22), transparent 60%),
+    radial-gradient(50rem 50rem at 100% 0%, rgba(236, 72, 153, 0.18), transparent 55%),
+    radial-gradient(55rem 55rem at 50% 120%, rgba(34, 211, 238, 0.14), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* ---- Reusable bits used by the page ---- */
+
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.gradient-text {
+  background: linear-gradient(100deg, #c4b5fd, #f0abfc 45%, #67e8f9);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glow-violet {
+  box-shadow:
+    0 0 0 1px rgba(167, 139, 250, 0.4),
+    0 8px 30px -8px rgba(139, 92, 246, 0.6);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.dot {
+  animation: pulse-dot 1.1s infinite ease-in-out;
+}
+
+@keyframes float-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.float-in {
+  animation: float-in 0.35s ease-out both;
+}
+
+/* Thin custom scrollbar for the chat area */
+.scroll-slim::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll-slim::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
