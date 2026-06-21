@@ -1,0 +1,140 @@
+"""PDF ingestion pipeline (the write path).
+
+Pipeline:
+    load PDF -> clean text -> chunk -> embed -> store in ChromaDB (persisted)
+
+The :class:`IngestionPipeline` orchestrates these steps. Embedding + storage
+are delegated to :class:`~app.services.vectorstore_service.VectorStoreService`,
+so this module focuses on turning a PDF file into clean, chunked, metadata-rich
+:class:`~langchain_core.documents.Document` objects.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from app.core.config import Settings
+from app.core.logging_config import get_logger
+from app.services.vectorstore_service import VectorStoreService
+from app.utils.exceptions import EmptyPDFError, InvalidPDFError
+from app.utils.text_cleaning import clean_text
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class IngestionResult:
+    """Outcome of ingesting a single PDF."""
+
+    filename: str
+    pages: int
+    chunks_created: int
+
+
+class IngestionPipeline:
+    """Loads, cleans, chunks, embeds and stores PDF content."""
+
+    def __init__(
+        self, settings: Settings, vector_store: VectorStoreService
+    ) -> None:
+        self._settings = settings
+        self._vector_store = vector_store
+        # RecursiveCharacterTextSplitter respects natural boundaries
+        # (paragraphs -> lines -> words) for cleaner, more coherent chunks.
+        self._splitter = RecursiveCharacterTextSplitter(
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],
+            length_function=len,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def ingest(self, pdf_path: Path, original_filename: str) -> IngestionResult:
+        """Run the full ingestion pipeline for one PDF.
+
+        Args:
+            pdf_path: Path to the PDF file on disk.
+            original_filename: The name to record as the chunk source.
+
+        Returns:
+            An :class:`IngestionResult` summarising what was stored.
+
+        Raises:
+            InvalidPDFError: If the file cannot be parsed as a PDF.
+            EmptyPDFError: If no usable text could be extracted.
+        """
+        logger.info("Ingestion started for '%s'", original_filename)
+
+        pages = self._load(pdf_path, original_filename)
+        cleaned_pages = self._clean(pages, original_filename)
+        chunks = self._chunk(cleaned_pages, original_filename)
+
+        stored = self._vector_store.add_documents(chunks)
+        logger.info(
+            "Ingestion finished for '%s': %d page(s), %d chunk(s) stored",
+            original_filename,
+            len(pages),
+            stored,
+        )
+        return IngestionResult(
+            filename=original_filename,
+            pages=len(pages),
+            chunks_created=stored,
+        )
+
+    # ------------------------------------------------------------------
+    # Pipeline steps
+    # ------------------------------------------------------------------
+    def _load(self, pdf_path: Path, filename: str) -> list[Document]:
+        """Step 1: Load the PDF into per-page documents."""
+        try:
+            documents = PyPDFLoader(str(pdf_path)).load()
+        except Exception as exc:
+            raise InvalidPDFError(
+                f"'{filename}' could not be read as a valid PDF: {exc}"
+            ) from exc
+
+        if not documents:
+            raise EmptyPDFError(f"'{filename}' contains no pages.")
+        logger.info("Loaded %d page(s) from '%s'", len(documents), filename)
+        return documents
+
+    def _clean(self, pages: list[Document], filename: str) -> list[Document]:
+        """Step 2: Clean each page's text; drop pages with no content."""
+        cleaned: list[Document] = []
+        for page in pages:
+            text = clean_text(page.page_content)
+            if not text:
+                continue
+            page.page_content = text
+            cleaned.append(page)
+
+        if not cleaned:
+            raise EmptyPDFError(
+                f"'{filename}' has no extractable text (it may be a scanned "
+                "image-only PDF that requires OCR)."
+            )
+        return cleaned
+
+    def _chunk(self, pages: list[Document], filename: str) -> list[Document]:
+        """Step 3: Split pages into overlapping chunks with rich metadata."""
+        chunks = self._splitter.split_documents(pages)
+
+        # Attach consistent source-tracking metadata to every chunk.
+        for index, chunk in enumerate(chunks):
+            page_number = chunk.metadata.get("page")
+            chunk.metadata = {
+                "source": filename,
+                "page": page_number,
+                "chunk_index": index,
+            }
+
+        logger.info("Created %d chunk(s) for '%s'", len(chunks), filename)
+        return chunks
