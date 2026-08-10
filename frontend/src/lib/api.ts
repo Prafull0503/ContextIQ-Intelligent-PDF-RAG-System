@@ -1,9 +1,5 @@
 /**
  * Typed client for the ContextIQ FastAPI backend.
- *
- * The base URL comes from NEXT_PUBLIC_API_URL (see .env.local) and defaults to
- * the local dev server. Each function maps 1:1 to a backend endpoint and mirrors
- * the Pydantic schemas in app/models/schemas.py.
  */
 
 const API_URL =
@@ -52,6 +48,39 @@ export interface DeleteDocumentResponse {
   filename: string;
 }
 
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  username?: string;
+}
+
+export interface UserResponse {
+  id: number;
+  email: string;
+  username: string;
+  created_at: string;
+}
+
+/** Get authentication headers if JWT token is stored in localStorage. */
+function getAuthHeaders(): HeadersInit {
+  if (typeof window !== "undefined") {
+    const token = localStorage.getItem("contextiq_token");
+    if (token) {
+      return { Authorization: `Bearer ${token}` };
+    }
+  }
+  return {};
+}
+
+/** Wrapper around window.fetch that automatically injects JWT bearer tokens. */
+async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+  const headers = {
+    ...getAuthHeaders(),
+    ...options.headers,
+  };
+  return fetch(url, { ...options, headers });
+}
+
 /** Pull `detail` out of the backend's error envelope, falling back to status text. */
 async function parseError(res: Response): Promise<string> {
   try {
@@ -63,8 +92,50 @@ async function parseError(res: Response): Promise<string> {
   return `Request failed (${res.status} ${res.statusText})`;
 }
 
+// ---------------------------------------------------------------------------
+// Authentication APIs
+// ---------------------------------------------------------------------------
+
+export async function signup(email: string, password: string, username: string): Promise<UserResponse> {
+  const res = await fetch(`${API_URL}/auth/signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, username }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
+export async function login(email: string, password: string): Promise<TokenResponse> {
+  const res = await fetch(`${API_URL}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  const data: TokenResponse = await res.json();
+  if (typeof window !== "undefined") {
+    localStorage.setItem("contextiq_token", data.access_token);
+    localStorage.setItem("contextiq_email", email);
+    localStorage.setItem("contextiq_username", data.username || email.split("@")[0]);
+  }
+  return data;
+}
+
+export function logout(): void {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("contextiq_token");
+    localStorage.removeItem("contextiq_email");
+    localStorage.removeItem("contextiq_username");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Protected RAG APIs
+// ---------------------------------------------------------------------------
+
 export async function getHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${API_URL}/health`, { cache: "no-store" });
+  const res = await fetchWithAuth(`${API_URL}/health`, { cache: "no-store" });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
@@ -72,8 +143,7 @@ export async function getHealth(): Promise<HealthResponse> {
 export async function uploadPdf(file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
-  // Using generic upload endpoint (works with word, text, csv, and pdf)
-  const res = await fetch(`${API_URL}/upload`, {
+  const res = await fetchWithAuth(`${API_URL}/upload`, {
     method: "POST",
     body: form,
   });
@@ -82,13 +152,13 @@ export async function uploadPdf(file: File): Promise<UploadResponse> {
 }
 
 export async function getDocuments(): Promise<DocumentListResponse> {
-  const res = await fetch(`${API_URL}/documents`, { cache: "no-store" });
+  const res = await fetchWithAuth(`${API_URL}/documents`, { cache: "no-store" });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
 
 export async function deleteDocument(filename: string): Promise<DeleteDocumentResponse> {
-  const res = await fetch(`${API_URL}/documents/${encodeURIComponent(filename)}`, {
+  const res = await fetchWithAuth(`${API_URL}/documents/${encodeURIComponent(filename)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await parseError(res));
@@ -101,7 +171,7 @@ export async function ask(
   topK?: number,
   selectedDocument?: string | null,
 ): Promise<AskResponse> {
-  const res = await fetch(`${API_URL}/ask`, {
+  const res = await fetchWithAuth(`${API_URL}/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

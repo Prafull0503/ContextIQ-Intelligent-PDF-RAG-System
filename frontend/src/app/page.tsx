@@ -1,18 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ask,
   getHealth,
   uploadPdf,
   getDocuments,
   deleteDocument,
+  logout,
   type HealthResponse,
   type Message,
   type SourceChunk,
 } from "@/lib/api";
 
 export default function Home() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userName, setUserName] = useState<string | null>(null);
+
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
@@ -30,14 +37,36 @@ export default function Home() {
   const [asking, setAsking] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Authenticate token on load
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const token = localStorage.getItem("contextiq_token");
+      const email = localStorage.getItem("contextiq_email");
+      const username = localStorage.getItem("contextiq_username");
+      if (!token) {
+        router.push("/login");
+      } else {
+        setUserEmail(email);
+        setUserName(username || email?.split("@")[0] || "User");
+        setAuthChecked(true);
+      }
+    }
+  }, [router]);
+
   const refreshHealth = useCallback(async () => {
     try {
       setHealth(await getHealth());
       setHealthError(null);
     } catch (err) {
+      if (err instanceof Error && err.message.includes("401")) {
+        // Token expired/invalid, logout and redirect
+        logout();
+        router.push("/login");
+        return;
+      }
       setHealthError(err instanceof Error ? err.message : "Backend unreachable");
     }
-  }, []);
+  }, [router]);
 
   const refreshDocuments = useCallback(async () => {
     try {
@@ -48,14 +77,21 @@ export default function Home() {
         return res.documents[0] || null;
       });
     } catch (err) {
+      if (err instanceof Error && err.message.includes("401")) {
+        logout();
+        router.push("/login");
+        return;
+      }
       console.error("Failed to fetch documents list:", err);
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
-    refreshHealth();
-    refreshDocuments();
-  }, [refreshHealth, refreshDocuments]);
+    if (authChecked) {
+      refreshHealth();
+      refreshDocuments();
+    }
+  }, [authChecked, refreshHealth, refreshDocuments]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -132,6 +168,21 @@ export default function Home() {
     } finally {
       setAsking(false);
     }
+  }
+
+  function handleLogoutClick() {
+    logout();
+    router.push("/login");
+  }
+
+  if (!authChecked) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center">
+        <span className="dot h-2 w-2 rounded-full bg-fuchsia-300 mr-1" />
+        <span className="dot h-2 w-2 rounded-full bg-fuchsia-300 mr-1" style={{ animationDelay: "0.2s" }} />
+        <span className="dot h-2 w-2 rounded-full bg-fuchsia-300" style={{ animationDelay: "0.4s" }} />
+      </div>
+    );
   }
 
   const indexed = health?.documents_indexed ?? 0;
@@ -302,8 +353,21 @@ export default function Home() {
         </div>
 
         {/* Footer */}
-        <footer className="border-t border-white/6 pt-4 text-center text-[9px] text-foreground/25 mt-4">
-          ContextIQ v1.0 · Strict Grounded Mode - by Prafull Shukla
+        <footer className="border-t border-white/6 pt-4 flex flex-col gap-3 mt-4">
+          <div className="flex items-center justify-between text-[10px] text-foreground/60 bg-white/[0.02] border border-white/5 rounded-lg px-2.5 py-2">
+            <span className="truncate max-w-[180px]" title={userEmail || undefined}>
+              👤 Logged in as: {userName}
+            </span>
+            <button
+              onClick={handleLogoutClick}
+              className="text-red-400 hover:text-red-300 font-bold transition cursor-pointer"
+            >
+              Log Out
+            </button>
+          </div>
+          <div className="text-center text-[9px] text-foreground/25">
+            ContextIQ v1.0 · Strict Grounded Mode - by Prafull Shukla
+          </div>
         </footer>
       </aside>
 
