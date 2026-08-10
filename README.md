@@ -13,6 +13,7 @@ ContextIQ is an enterprise-grade, production-ready **Retrieval-Augmented Generat
 * **Cross-Encoder Re-ranking** — Lazy loads a local deep-learning cross-encoder model (`ms-marco-MiniLM-L-6-v2`) to re-score and re-sort retrieved chunks.
 * **Web Search Fallback** — Automatically routes queries to DuckDuckGo search if matching document context is missing or similarity is low.
 * **Document Management** — Instantly list indexed documents and delete them (clearing vectors from ChromaDB and unlinking physical storage from disk).
+* **PostgreSQL & JWT Authentication** — Secure multi-user setup using JWT tokens, custom username registration, password hashing, and user-level multi-tenant document isolation in ChromaDB.
 * **Obsidian Nebula Dashboard** — A 100% responsive, glassy frontend layout supporting drag-and-drop uploads, scroll timelines, mobile drawer menus, and grounding citations overlays.
 
 ---
@@ -25,9 +26,9 @@ ContextIQ is an enterprise-grade, production-ready **Retrieval-Augmented Generat
                          │    (Obsidian Nebula Dashboard Layout)    │
                          └───────────────────┬──────────────────────┘
                                              │
-                         ┌───────────────────▼──────────────────────┐
+                         ┌──────────────────────────────────────────┐
                          │               FastAPI API                │
-                         │    /upload     /ask    /documents (G/D)  │
+                         │  /auth (S/L)   /upload   /ask   /documents│
                          └───────┬───────────────┬──────────────────┘
                                  │               │
                   ┌──────────────▼──┐        ┌───▼───────────────┐
@@ -59,6 +60,7 @@ ContextIQ/
 │   ├── application.py    # Startup lifespan, CORS, and exception routers
 │   ├── core/             # Configuration & logging setups
 │   │   ├── config.py
+│   │   ├── database.py   # PostgreSQL/SQLite engine and session pooler
 │   │   └── logging_config.py
 │   ├── models/           # Request/response models
 │   │   └── schemas.py
@@ -70,9 +72,10 @@ ContextIQ/
 │   │   ├── llm_service.py
 │   │   ├── vectorstore_service.py
 │   │   └── rag_service.py
-│   └── utils/            # Domain exceptions and cleaners
+│   └── utils/            # Domain exceptions and auth utilities
 │       ├── exceptions.py
-│       └── text_cleaning.py
+│       ├── text_cleaning.py
+│       └── auth.py       # Password hash and JWT token codecs
 ├── frontend/             # Next.js (TypeScript / Tailwind) Dashboard UI
 │   ├── src/app/
 │   │   ├── page.tsx      # Main layout component
@@ -129,6 +132,22 @@ Open **http://localhost:3000** in your browser to load the dashboard.
 ---
 
 ## 📡 API Usage
+
+### `POST /auth/signup`
+Registers a new user with email, password, and custom username.
+```bash
+curl -X POST http://localhost:8000/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "mypassword", "username": "Prafull"}'
+```
+
+### `POST /auth/login`
+Verifies user credentials and returns a signed JWT access token and custom username.
+```bash
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "mypassword"}'
+```
 
 ### `GET /health`
 Returns system heartbeat, active embedding/LLM providers, and indexed counts.
