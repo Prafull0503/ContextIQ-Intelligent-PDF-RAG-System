@@ -57,9 +57,9 @@ class RAGService:
     # ------------------------------------------------------------------
     # Operations
     # ------------------------------------------------------------------
-    def ingest_pdf(self, pdf_path: Path, original_filename: str) -> IngestionResult:
+    def ingest_pdf(self, pdf_path: Path, original_filename: str, user_id: int) -> IngestionResult:
         """Ingest a PDF into the vector store."""
-        return self._ingestion.ingest(pdf_path, original_filename)
+        return self._ingestion.ingest(pdf_path, original_filename, user_id)
 
     def ask(
         self,
