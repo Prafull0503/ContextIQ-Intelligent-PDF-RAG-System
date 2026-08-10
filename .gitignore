@@ -15,6 +15,9 @@ env/
 # Application data (vector store + uploaded PDFs)
 data/chroma_db/
 data/pdfs/
+data/*.db
+*.db
+*.sqlite
 
 # IDE / OS
 .idea/
