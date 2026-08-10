@@ -67,6 +67,7 @@ class RAGService:
         history: list[dict] | None = None,
         top_k: int | None = None,
         selected_document: str | None = None,
+        user_id: int | None = None,
     ) -> RAGAnswer:
         """Answer a question using the RAG pipeline (building the LLM lazily)."""
         if self._rag_pipeline is None:
@@ -75,7 +76,11 @@ class RAGService:
                 self._settings, self._vector_store, self._llm
             )
         return self._rag_pipeline.answer(
-            question, history=history, top_k=top_k, selected_document=selected_document
+            question,
+            history=history,
+            top_k=top_k,
+            selected_document=selected_document,
+            user_id=user_id,
         )
 
     def list_documents(self, user_id: int) -> list[str]:
