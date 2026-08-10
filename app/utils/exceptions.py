@@ -23,16 +23,21 @@ class RAGError(Exception):
         self.message = message
 
 
-class InvalidPDFError(RAGError):
-    """Raised when a file is not a valid / readable PDF."""
+class InvalidDocumentError(RAGError):
+    """Raised when a file is not a valid / readable document."""
 
     status_code = 400
 
 
-class EmptyPDFError(RAGError):
-    """Raised when a PDF contains no extractable text."""
+class EmptyDocumentError(RAGError):
+    """Raised when a document contains no extractable text."""
 
     status_code = 422
+
+
+# Backwards compatibility aliases
+InvalidPDFError = InvalidDocumentError
+EmptyPDFError = EmptyDocumentError
 
 
 class MissingAPIKeyError(RAGError):

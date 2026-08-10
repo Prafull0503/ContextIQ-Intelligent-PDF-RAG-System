@@ -46,7 +46,32 @@ _SYSTEM_PROMPT = (
     f"EXACTLY this and nothing else: \"{_NOT_FOUND_MESSAGE}\"\n"
 )
 
-_HUMAN_PROMPT = "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+_HUMAN_PROMPT = (
+    "Context:\n{context}\n\n"
+    "Chat History:\n{chat_history}\n\n"
+    "Question: {question}\n\n"
+    "Answer:"
+)
+
+_CONDENSE_PROMPT = (
+    "Given the following conversation history and a follow-up question, rephrase the follow-up "
+    "question to be a standalone question (in its original language), containing all necessary context "
+    "from the history. Do not answer the question, just rephrase it.\n\n"
+    "Chat History:\n{chat_history}\n\n"
+    "Follow-up Question: {question}\n\n"
+    "Standalone Question:"
+)
+
+_WEB_SYSTEM_PROMPT = (
+    "You answer questions strictly and only using the provided web search results.\n"
+    "Rules:\n"
+    "1. Be direct, helpful, and concise.\n"
+    "2. State clearly that the information was retrieved from the web (external source), "
+    "rather than the uploaded documents.\n"
+    "3. Keep the tone professional.\n"
+)
+
+_WEB_HUMAN_PROMPT = "Search Results:\n{search_results}\n\nQuestion: {question}\n\nAnswer:"
 
 
 @dataclass
@@ -83,13 +108,31 @@ class RAGPipeline:
         )
         # LangChain Expression Language chain: prompt -> llm -> string.
         self._chain = self._prompt | self._llm | StrOutputParser()
+        self._reranker = None
 
-    def answer(self, question: str, top_k: int | None = None) -> RAGAnswer:
+    def _get_reranker(self):
+        """Load cross-encoder model lazily."""
+        if self._reranker is None:
+            logger.info("Loading Cross-Encoder reranker model (cross-encoder/ms-marco-MiniLM-L-6-v2)...")
+            from sentence_transformers import CrossEncoder
+            self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            logger.info("Cross-Encoder reranker loaded.")
+        return self._reranker
+
+    def answer(
+        self,
+        question: str,
+        history: list[dict] | None = None,
+        top_k: int | None = None,
+        selected_document: str | None = None,
+    ) -> RAGAnswer:
         """Answer a question from the indexed documents.
 
         Args:
             question: The user's natural-language question.
+            history: Previous messages in the conversation.
             top_k: Optional override for the number of chunks to retrieve.
+            selected_document: Optional document source filename to filter by.
 
         Returns:
             A :class:`RAGAnswer` with the answer, source chunks and confidence.
@@ -105,34 +148,112 @@ class RAGPipeline:
                 "No documents have been indexed yet. Upload a PDF first."
             )
 
+        # --- Query condensation ---
+        history_list = history or []
+        standalone_question = question
+        chat_history_str = ""
+
+        if history_list:
+            for msg in history_list:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                chat_history_str += f"{role.capitalize()}: {content}\n"
+
+            try:
+                condense_prompt_text = _CONDENSE_PROMPT.format(
+                    chat_history=chat_history_str.strip(), question=question
+                )
+                logger.info("Rewriting follow-up question using chat history...")
+                standalone_question = self._llm.invoke(condense_prompt_text).content.strip()
+                logger.info("Rewritten question: '%s'", standalone_question)
+            except Exception as exc:
+                logger.warning("Query condensation failed, falling back to original question: %s", exc)
+                standalone_question = question
+
+        if not chat_history_str:
+            chat_history_str = "None"
+
         # --- Retrieval: embedding + similarity search + top-K ---
-        retrieved = self._vector_store.similarity_search(question, k=k)
+        # Fetch more candidates to enable effective re-ranking
+        initial_k = max(20, k * 3)
+        retrieved = self._vector_store.similarity_search(
+            standalone_question, k=initial_k, filter_source=selected_document
+        )
         chunks = [RetrievedChunk(document=doc, score=score) for doc, score in retrieved]
 
-        if not chunks:
-            logger.info("No relevant chunks found for question.")
-            return RAGAnswer(
-                answer=_NOT_FOUND_MESSAGE,
-                chunks=[],
-                confidence=0.0,
-            )
+        # Flag indicating if we need to search the web
+        fallback_triggered = not chunks
 
-        # --- Context injection ---
-        context = self._format_context(chunks)
+        if chunks:
+            # --- Re-ranking using Cross-Encoder ---
+            try:
+                reranker = self._get_reranker()
+                pairs = [[standalone_question, c.document.page_content] for c in chunks]
+                rerank_scores = reranker.predict(pairs)
+                
+                import math
+                for chunk, raw_score in zip(chunks, rerank_scores):
+                    # Sigmoid function to map logit scores to [0, 1] range
+                    sig_score = 1.0 / (1.0 + math.exp(-float(raw_score)))
+                    chunk.score = round(sig_score, 4)
+                    
+                chunks = sorted(chunks, key=lambda x: x.score, reverse=True)
+                chunks = chunks[:k]
+                logger.info("Re-ranking complete. Retained top-%d chunks.", len(chunks))
+            except Exception as exc:
+                logger.warning("Re-ranking failed, falling back to original retriever rankings: %s", exc)
+                chunks = chunks[:k]
 
-        # --- Generation ---
-        try:
-            answer = self._chain.invoke({"context": context, "question": question})
-        except Exception as exc:
-            raise LLMError(f"LLM failed to generate an answer: {exc}") from exc
+            # --- Context injection ---
+            context = self._format_context(chunks)
 
-        answer = answer.strip()
+            # --- Generation ---
+            try:
+                answer = self._chain.invoke({
+                    "context": context,
+                    "chat_history": chat_history_str.strip(),
+                    "question": standalone_question,
+                })
+            except Exception as exc:
+                raise LLMError(f"LLM failed to generate an answer: {exc}") from exc
 
-        # If the question was outside the PDF content, return the fixed message
-        # with no sources/confidence — the retrieved chunks aren't a real answer.
-        if answer == _NOT_FOUND_MESSAGE:
-            logger.info("Question not answerable from the indexed PDFs.")
-            return RAGAnswer(answer=_NOT_FOUND_MESSAGE, chunks=[], confidence=0.0)
+            answer = answer.strip()
+            if answer == _NOT_FOUND_MESSAGE:
+                fallback_triggered = True
+        else:
+            answer = _NOT_FOUND_MESSAGE
+
+        if fallback_triggered:
+            logger.info("Content not found in documents. Falling back to web search...")
+            try:
+                from langchain_community.tools import DuckDuckGoSearchRun
+                search = DuckDuckGoSearchRun()
+                search_results = search.run(standalone_question)
+
+                from langchain_core.prompts import ChatPromptTemplate
+                web_prompt = ChatPromptTemplate.from_messages([
+                    ("system", _WEB_SYSTEM_PROMPT),
+                    ("human", _WEB_HUMAN_PROMPT)
+                ])
+                web_chain = web_prompt | self._llm | StrOutputParser()
+                web_answer = web_chain.invoke({
+                    "search_results": search_results,
+                    "question": standalone_question
+                })
+                
+                logger.info("Generated answer from web search fallback.")
+                return RAGAnswer(
+                    answer=web_answer.strip(),
+                    chunks=[],
+                    confidence=0.4
+                )
+            except Exception as exc:
+                logger.warning("Web search fallback failed: %s", exc)
+                return RAGAnswer(
+                    answer=_NOT_FOUND_MESSAGE,
+                    chunks=[],
+                    confidence=0.0
+                )
 
         confidence = self._confidence(chunks)
         logger.info(

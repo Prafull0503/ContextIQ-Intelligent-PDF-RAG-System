@@ -21,7 +21,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.core.config import Settings
 from app.core.logging_config import get_logger
 from app.services.vectorstore_service import VectorStoreService
-from app.utils.exceptions import EmptyPDFError, InvalidPDFError
+from app.utils.exceptions import EmptyDocumentError, InvalidDocumentError
 from app.utils.text_cleaning import clean_text
 
 logger = get_logger(__name__)
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class IngestionResult:
-    """Outcome of ingesting a single PDF."""
+    """Outcome of ingesting a single document."""
 
     filename: str
     pages: int
@@ -37,7 +37,7 @@ class IngestionResult:
 
 
 class IngestionPipeline:
-    """Loads, cleans, chunks, embeds and stores PDF content."""
+    """Loads, cleans, chunks, embeds and stores document content."""
 
     def __init__(
         self, settings: Settings, vector_store: VectorStoreService
@@ -57,18 +57,18 @@ class IngestionPipeline:
     # Public API
     # ------------------------------------------------------------------
     def ingest(self, pdf_path: Path, original_filename: str) -> IngestionResult:
-        """Run the full ingestion pipeline for one PDF.
+        """Run the full ingestion pipeline for one document.
 
         Args:
-            pdf_path: Path to the PDF file on disk.
+            pdf_path: Path to the document file on disk.
             original_filename: The name to record as the chunk source.
 
         Returns:
             An :class:`IngestionResult` summarising what was stored.
 
         Raises:
-            InvalidPDFError: If the file cannot be parsed as a PDF.
-            EmptyPDFError: If no usable text could be extracted.
+            InvalidDocumentError: If the file cannot be parsed.
+            EmptyDocumentError: If no usable text could be extracted.
         """
         logger.info("Ingestion started for '%s'", original_filename)
 
@@ -78,7 +78,7 @@ class IngestionPipeline:
 
         stored = self._vector_store.add_documents(chunks)
         logger.info(
-            "Ingestion finished for '%s': %d page(s), %d chunk(s) stored",
+            "Ingestion finished for '%s': %d page/section(s), %d chunk(s) stored",
             original_filename,
             len(pages),
             stored,
@@ -93,17 +93,30 @@ class IngestionPipeline:
     # Pipeline steps
     # ------------------------------------------------------------------
     def _load(self, pdf_path: Path, filename: str) -> list[Document]:
-        """Step 1: Load the PDF into per-page documents."""
+        """Step 1: Load the document into per-page/per-section documents."""
+        ext = pdf_path.suffix.lower()
         try:
-            documents = PyPDFLoader(str(pdf_path)).load()
+            if ext == ".pdf":
+                documents = PyPDFLoader(str(pdf_path)).load()
+            elif ext == ".docx":
+                from langchain_community.document_loaders import Docx2txtLoader
+                documents = Docx2txtLoader(str(pdf_path)).load()
+            elif ext == ".txt":
+                from langchain_community.document_loaders import TextLoader
+                documents = TextLoader(str(pdf_path), encoding="utf-8").load()
+            elif ext == ".csv":
+                from langchain_community.document_loaders import CSVLoader
+                documents = CSVLoader(str(pdf_path)).load()
+            else:
+                raise ValueError(f"Unsupported file extension: {ext}")
         except Exception as exc:
-            raise InvalidPDFError(
-                f"'{filename}' could not be read as a valid PDF: {exc}"
+            raise InvalidDocumentError(
+                f"'{filename}' could not be read as a valid document: {exc}"
             ) from exc
 
         if not documents:
-            raise EmptyPDFError(f"'{filename}' contains no pages.")
-        logger.info("Loaded %d page(s) from '%s'", len(documents), filename)
+            raise EmptyDocumentError(f"'{filename}' contains no content.")
+        logger.info("Loaded %d page/section(s) from '%s'", len(documents), filename)
         return documents
 
     def _clean(self, pages: list[Document], filename: str) -> list[Document]:
@@ -130,11 +143,13 @@ class IngestionPipeline:
         # Attach consistent source-tracking metadata to every chunk.
         for index, chunk in enumerate(chunks):
             page_number = chunk.metadata.get("page")
-            chunk.metadata = {
+            meta = {
                 "source": filename,
-                "page": page_number,
                 "chunk_index": index,
             }
+            if page_number is not None:
+                meta["page"] = page_number
+            chunk.metadata = meta
 
         logger.info("Created %d chunk(s) for '%s'", len(chunks), filename)
         return chunks

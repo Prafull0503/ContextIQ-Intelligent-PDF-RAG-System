@@ -24,6 +24,9 @@ from app.models.schemas import (
     AskResponse,
     HealthResponse,
     UploadResponse,
+    DocumentListResponse,
+    DeleteDocumentResponse,
+    SourceChunkSchema,
 )
 from app.services.rag_service import RAGService, get_rag_service
 from app.utils.exceptions import InvalidPDFError
@@ -49,32 +52,47 @@ async def health(
 
 
 @router.post(
-    "/upload-pdf",
+    "/upload",
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["ingestion"],
 )
-async def upload_pdf(
-    file: UploadFile = File(..., description="A PDF document to ingest."),
+@router.post(
+    "/upload-pdf",
+    response_model=UploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["ingestion"],
+    include_in_schema=False,
+)
+async def upload_file(
+    file: UploadFile = File(..., description="A document to ingest."),
     service: RAGService = Depends(get_rag_service),
 ) -> UploadResponse:
-    """Upload a PDF, ingest it, and persist its embeddings to ChromaDB."""
+    """Upload a document, ingest it, and persist its embeddings to ChromaDB."""
     filename = file.filename or "uploaded.pdf"
 
     # --- Basic validation before doing any expensive work ---
-    if not filename.lower().endswith(".pdf"):
-        raise InvalidPDFError("Only .pdf files are accepted.")
-    if (file.content_type or "").lower() not in {
+    allowed_exts = {".pdf", ".docx", ".txt", ".csv"}
+    if not any(filename.lower().endswith(ext) for ext in allowed_exts):
+        raise InvalidPDFError("Only .pdf, .docx, .txt, and .csv files are accepted.")
+
+    allowed_mimes = {
         "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+        "text/csv",
+        "application/csv",
         "application/octet-stream",
-    }:
+    }
+    content_type = (file.content_type or "").lower()
+    if content_type and content_type not in allowed_mimes:
         raise InvalidPDFError(f"Unexpected content type: {file.content_type}")
 
     contents = await file.read()
     if not contents:
         raise InvalidPDFError("The uploaded file is empty.")
     if len(contents) > _MAX_PDF_BYTES:
-        raise InvalidPDFError("PDF exceeds the 25 MB size limit.")
+        raise InvalidPDFError("File exceeds the 25 MB size limit.")
 
     # --- Persist the upload to disk (unique name avoids collisions) ---
     upload_dir: Path = service.settings.pdf_upload_dir_resolved
@@ -86,10 +104,40 @@ async def upload_pdf(
     result = await run_in_threadpool(service.ingest_pdf, stored_path, filename)
 
     return UploadResponse(
-        message="PDF processed successfully",
+        message="Document processed successfully",
         filename=result.filename,
         chunks_created=result.chunks_created,
         pages=result.pages,
+    )
+
+
+@router.get(
+    "/documents",
+    response_model=DocumentListResponse,
+    tags=["ingestion"],
+)
+async def list_documents(
+    service: RAGService = Depends(get_rag_service),
+) -> DocumentListResponse:
+    """Get the list of unique filenames currently indexed in the vector store."""
+    docs = await run_in_threadpool(service.list_documents)
+    return DocumentListResponse(documents=docs)
+
+
+@router.delete(
+    "/documents/{filename}",
+    response_model=DeleteDocumentResponse,
+    tags=["ingestion"],
+)
+async def delete_document(
+    filename: str,
+    service: RAGService = Depends(get_rag_service),
+) -> DeleteDocumentResponse:
+    """Delete a document from the vector store and its physical file on disk."""
+    await run_in_threadpool(service.delete_document, filename)
+    return DeleteDocumentResponse(
+        message="Document deleted successfully",
+        filename=filename,
     )
 
 
@@ -98,6 +146,27 @@ async def ask(
     payload: AskRequest,
     service: RAGService = Depends(get_rag_service),
 ) -> AskResponse:
-    """Answer a question grounded in the uploaded PDF content."""
-    result = await run_in_threadpool(service.ask, payload.question, payload.top_k)
-    return AskResponse(answer=result.answer)
+    """Answer a question grounded in the uploaded document content."""
+    history_dicts = [msg.model_dump() for msg in payload.history]
+    result = await run_in_threadpool(
+        service.ask, payload.question, history_dicts, payload.top_k, payload.selected_document
+    )
+    
+    sources = []
+    if result.chunks:
+        for chunk in result.chunks:
+            meta = chunk.document.metadata or {}
+            sources.append(
+                SourceChunkSchema(
+                    content=chunk.document.page_content,
+                    source=meta.get("source", "unknown"),
+                    page=meta.get("page"),
+                    score=chunk.score,
+                )
+            )
+            
+    return AskResponse(
+        answer=result.answer,
+        sources=sources if sources else None,
+        confidence=result.confidence,
+    )

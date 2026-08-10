@@ -61,14 +61,42 @@ class RAGService:
         """Ingest a PDF into the vector store."""
         return self._ingestion.ingest(pdf_path, original_filename)
 
-    def ask(self, question: str, top_k: int | None = None) -> RAGAnswer:
+    def ask(
+        self,
+        question: str,
+        history: list[dict] | None = None,
+        top_k: int | None = None,
+        selected_document: str | None = None,
+    ) -> RAGAnswer:
         """Answer a question using the RAG pipeline (building the LLM lazily)."""
         if self._rag_pipeline is None:
             self._llm = build_llm(self._settings)
             self._rag_pipeline = RAGPipeline(
                 self._settings, self._vector_store, self._llm
             )
-        return self._rag_pipeline.answer(question, top_k=top_k)
+        return self._rag_pipeline.answer(
+            question, history=history, top_k=top_k, selected_document=selected_document
+        )
+
+    def list_documents(self) -> list[str]:
+        """List unique source filenames currently stored in ChromaDB."""
+        return self._vector_store.list_documents()
+
+    def delete_document(self, filename: str) -> None:
+        """Delete all chunks for a document from vector store and remove physical file from disk."""
+        # Delete from ChromaDB
+        self._vector_store.delete_document(filename)
+
+        # Delete physical file(s)
+        upload_dir = self._settings.pdf_upload_dir_resolved
+        if upload_dir.exists():
+            for path in upload_dir.iterdir():
+                if path.is_file() and (path.name == filename or path.name.endswith(f"_{filename}")):
+                    try:
+                        path.unlink()
+                        logger.info("Deleted physical file: %s", path)
+                    except Exception as exc:
+                        logger.warning("Could not delete physical file '%s': %s", path, exc)
 
 
 # ---------------------------------------------------------------------------

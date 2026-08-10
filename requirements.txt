@@ -25,8 +25,13 @@ chromadb==0.5.23
 # ---- Embeddings (local / HuggingFace option) ----
 sentence-transformers==3.3.1
 
-# ---- PDF loading ----
+# ---- PDF and Document loading ----
 pypdf==5.1.0
+docx2txt==0.9
+
+# ---- Keyword Search & Fallbacks ----
+rank-bm25==0.2.2
+duckduckgo-search>=6.1.7
 
 # ---- Tests ----
 pytest==8.3.4

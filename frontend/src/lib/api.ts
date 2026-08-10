@@ -23,8 +23,33 @@ export interface UploadResponse {
   pages: number;
 }
 
+export interface SourceChunk {
+  content: string;
+  source: string;
+  page?: number | null;
+  score?: number | null;
+}
+
 export interface AskResponse {
   answer: string;
+  sources?: SourceChunk[] | null;
+  confidence?: number | null;
+}
+
+export interface Message {
+  role: "user" | "assistant";
+  content: string;
+  sources?: SourceChunk[] | null;
+  confidence?: number | null;
+}
+
+export interface DocumentListResponse {
+  documents: string[];
+}
+
+export interface DeleteDocumentResponse {
+  message: string;
+  filename: string;
 }
 
 /** Pull `detail` out of the backend's error envelope, falling back to status text. */
@@ -47,7 +72,8 @@ export async function getHealth(): Promise<HealthResponse> {
 export async function uploadPdf(file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_URL}/upload-pdf`, {
+  // Using generic upload endpoint (works with word, text, csv, and pdf)
+  const res = await fetch(`${API_URL}/upload`, {
     method: "POST",
     body: form,
   });
@@ -55,14 +81,35 @@ export async function uploadPdf(file: File): Promise<UploadResponse> {
   return res.json();
 }
 
+export async function getDocuments(): Promise<DocumentListResponse> {
+  const res = await fetch(`${API_URL}/documents`, { cache: "no-store" });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
+export async function deleteDocument(filename: string): Promise<DeleteDocumentResponse> {
+  const res = await fetch(`${API_URL}/documents/${encodeURIComponent(filename)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
 export async function ask(
   question: string,
+  history: Message[] = [],
   topK?: number,
+  selectedDocument?: string | null,
 ): Promise<AskResponse> {
   const res = await fetch(`${API_URL}/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, top_k: topK ?? null }),
+    body: JSON.stringify({
+      question,
+      history,
+      top_k: topK ?? null,
+      selected_document: selectedDocument ?? null,
+    }),
   });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();

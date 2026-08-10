@@ -28,15 +28,26 @@ class FakeRAGService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self._count = 0
+        self.documents: list[str] = []
 
     def document_count(self) -> int:
         return self._count
 
     def ingest_pdf(self, pdf_path: Path, original_filename: str) -> IngestionResult:
         self._count += 3
+        if original_filename not in self.documents:
+            self.documents.append(original_filename)
         return IngestionResult(filename=original_filename, pages=2, chunks_created=3)
 
-    def ask(self, question: str, top_k=None) -> RAGAnswer:
+    def list_documents(self) -> list[str]:
+        return self.documents
+
+    def delete_document(self, filename: str) -> None:
+        if filename in self.documents:
+            self.documents.remove(filename)
+            self._count = max(0, self._count - 3)
+
+    def ask(self, question: str, history=None, top_k=None, selected_document=None) -> RAGAnswer:
         if self._count == 0:
             raise NoDocumentsError("No documents have been indexed yet.")
         doc = Document(
@@ -71,10 +82,10 @@ def test_ask_before_upload_returns_conflict(client: TestClient):
     assert resp.status_code == 409
 
 
-def test_upload_rejects_non_pdf(client: TestClient):
+def test_upload_rejects_unsupported_format(client: TestClient):
     resp = client.post(
         "/upload-pdf",
-        files={"file": ("notes.txt", b"hello", "text/plain")},
+        files={"file": ("image.png", b"fake png data", "image/png")},
     )
     assert resp.status_code == 400
 
@@ -91,11 +102,80 @@ def test_upload_then_ask_flow(client: TestClient):
     assert ask.status_code == 200
     body = ask.json()
     assert body["answer"] == "It is about RAG."
-    # Response is intentionally answer-only — no sources / confidence exposed.
-    assert "sources" not in body
-    assert "confidence" not in body
+    assert body["confidence"] == 0.9
+    assert len(body["sources"]) == 1
+    assert body["sources"][0]["source"] == "demo.pdf"
+    assert body["sources"][0]["page"] == 0
+    assert body["sources"][0]["score"] == 0.91
+    assert body["sources"][0]["content"] == "The document is about retrieval-augmented generation."
 
 
 def test_ask_validation_rejects_empty_question(client: TestClient):
     resp = client.post("/ask", json={"question": ""})
     assert resp.status_code == 422
+
+
+def test_list_and_delete_documents_flow(client: TestClient):
+    # 1. Initially, no documents are indexed
+    resp = client.get("/documents")
+    assert resp.status_code == 200
+    assert resp.json() == {"documents": []}
+
+    # 2. Upload a document
+    up = client.post(
+        "/upload-pdf",
+        files={"file": ("demo.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert up.status_code == 201
+
+    # 3. Verify it is listed
+    resp = client.get("/documents")
+    assert resp.status_code == 200
+    assert resp.json() == {"documents": ["demo.pdf"]}
+
+    # 4. Delete the document
+    del_resp = client.delete("/documents/demo.pdf")
+    assert del_resp.status_code == 200
+    assert del_resp.json() == {
+        "message": "Document deleted successfully",
+        "filename": "demo.pdf",
+    }
+
+    # 5. Verify it is gone
+    resp = client.get("/documents")
+    assert resp.status_code == 200
+    assert resp.json() == {"documents": []}
+
+
+def test_ask_with_history_succeeds(client: TestClient):
+    client.post(
+        "/upload-pdf",
+        files={"file": ("demo.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "What about that?",
+            "history": [{"role": "user", "content": "Tell me about RAG."}]
+        }
+    )
+    assert resp.status_code == 200
+    assert resp.json()["answer"] == "It is about RAG."
+
+
+def test_ask_with_selected_document_succeeds(client: TestClient):
+    client.post(
+        "/upload-pdf",
+        files={"file": ("demo.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "What is this about?",
+            "selected_document": "demo.pdf"
+        }
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "It is about RAG."
+    assert body["sources"][0]["source"] == "demo.pdf"

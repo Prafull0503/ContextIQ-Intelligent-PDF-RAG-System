@@ -37,9 +37,29 @@ class UploadResponse(BaseModel):
     pages: int = Field(..., description="Number of pages found in the PDF.")
 
 
+class DocumentListResponse(BaseModel):
+    """Response for the ``GET /documents`` endpoint."""
+
+    documents: list[str] = Field(..., description="List of unique filenames currently indexed.")
+
+
+class DeleteDocumentResponse(BaseModel):
+    """Response for the ``DELETE /documents/{filename}`` endpoint."""
+
+    message: str = Field(..., description="Status message.", examples=["Document deleted successfully."])
+    filename: str = Field(..., description="The name of the deleted document.")
+
+
 # ---------------------------------------------------------------------------
 # Ask
 # ---------------------------------------------------------------------------
+class Message(BaseModel):
+    """A single message in the conversation history."""
+
+    role: str = Field(..., description="Role of the sender: 'user' or 'assistant'.", examples=["user"])
+    content: str = Field(..., description="Text content of the message.")
+
+
 class AskRequest(BaseModel):
     """Request body for the ``POST /ask`` endpoint."""
 
@@ -55,16 +75,35 @@ class AskRequest(BaseModel):
         le=50,
         description="Override the number of chunks to retrieve for this query.",
     )
+    history: list[Message] = Field(
+        default_factory=list,
+        description="Conversation history of previous messages."
+    )
+    selected_document: str | None = Field(
+        default=None,
+        description="Filter retrieval strictly to chunks belonging to this document.",
+    )
+
+
+class SourceChunkSchema(BaseModel):
+    """Retrieved chunk citation info."""
+
+    content: str = Field(..., description="The raw text content of the chunk.")
+    source: str = Field(..., description="The name of the source document.")
+    page: int | None = Field(default=None, description="The page number in the original document.")
+    score: float | None = Field(default=None, description="The similarity/rerank score of this chunk.")
 
 
 class AskResponse(BaseModel):
-    """Response for the ``POST /ask`` endpoint.
-
-    Only the final answer is returned — retrieved source chunks and the
-    confidence score are used internally but intentionally not exposed.
-    """
+    """Response for the ``POST /ask`` endpoint."""
 
     answer: str
+    sources: list[SourceChunkSchema] | None = Field(
+        default=None, description="List of document text chunks used to generate the answer."
+    )
+    confidence: float | None = Field(
+        default=None, description="Confidence score representing retrieval relevance."
+    )
 
 
 # ---------------------------------------------------------------------------
