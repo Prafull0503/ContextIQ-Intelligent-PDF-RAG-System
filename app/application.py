@@ -33,6 +33,14 @@ async def lifespan(app: FastAPI):
         settings.llm_provider.value,
         settings.embedding_provider.value,
     )
+    
+    # Automatically bootstrap database tables (SQLite or PostgreSQL)
+    from sqlmodel import SQLModel
+    from app.core.database import engine
+    import app.models.schemas  # Force registration of SQLModel schemas
+    SQLModel.metadata.create_all(engine)
+    logger.info("Database tables verified/created.")
+
     # Eagerly initialise embeddings + vector store (downloads local model once).
     get_rag_service()
     logger.info("Startup complete.")

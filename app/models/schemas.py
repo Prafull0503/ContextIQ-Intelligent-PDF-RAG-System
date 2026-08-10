@@ -113,3 +113,42 @@ class ErrorResponse(BaseModel):
     """Standard error envelope."""
 
     detail: str
+
+
+# ---------------------------------------------------------------------------
+# User & Auth Databases
+# ---------------------------------------------------------------------------
+from datetime import datetime
+from sqlmodel import SQLModel, Field as SQLField
+
+class User(SQLModel, table=True):
+    """Database model for user records."""
+    id: int | None = SQLField(default=None, primary_key=True)
+    email: str = SQLField(unique=True, index=True, nullable=False)
+    username: str = SQLField(default="", nullable=False)
+    hashed_password: str = SQLField(nullable=False)
+    created_at: datetime = SQLField(default_factory=datetime.utcnow)
+
+class UserSignup(BaseModel):
+    """Schema for registering a new user."""
+    email: str
+    password: str
+    username: str
+
+class UserLogin(BaseModel):
+    """Schema for authenticating a user."""
+    email: str
+    password: str
+
+class TokenResponse(BaseModel):
+    """Response containing JWT access token."""
+    access_token: str
+    token_type: str = "bearer"
+    username: str = ""
+
+class UserResponse(BaseModel):
+    """Public user response schema."""
+    id: int
+    email: str
+    username: str
+    created_at: datetime

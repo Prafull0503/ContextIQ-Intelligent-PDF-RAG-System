@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # ---- App ----
     log_level: str = "INFO"
 
+    # ---- Database & Auth ----
+    database_url: str = "sqlite:///./data/sqlite.db"
+    jwt_secret_key: str = "contextiq_fallback_secure_secret_key_change_me_in_prod"
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 1440
+
     @field_validator("chunk_overlap")
     @classmethod
     def _overlap_must_be_smaller_than_size(cls, v: int, info) -> int:

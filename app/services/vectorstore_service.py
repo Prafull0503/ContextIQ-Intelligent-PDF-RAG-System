@@ -68,7 +68,7 @@ class VectorStoreService:
     # Reads
     # ------------------------------------------------------------------
     def similarity_search(
-        self, query: str, k: int, filter_source: str | None = None
+        self, query: str, k: int, filter_source: str | None = None, filter_user_id: int | None = None
     ) -> list[tuple[Document, float]]:
         """Return the top-``k`` chunks with similarity scores in [0, 1] using Hybrid Search (Vector + BM25 RRF).
 
@@ -76,13 +76,22 @@ class VectorStoreService:
             query: The user question.
             k: Number of chunks to retrieve.
             filter_source: Optional document source filename to filter by.
+            filter_user_id: Optional user ID to isolate context search.
 
         Returns:
             List of ``(Document, similarity_score)`` tuples, best first.
         """
         try:
             # 1. Vector search with score
-            search_filter = {"source": filter_source} if filter_source else None
+            if filter_source and filter_user_id is not None:
+                search_filter = {"$and": [{"source": filter_source}, {"user_id": filter_user_id}]}
+            elif filter_user_id is not None:
+                search_filter = {"user_id": filter_user_id}
+            elif filter_source:
+                search_filter = {"source": filter_source}
+            else:
+                search_filter = None
+            
             vector_results = self._store.similarity_search_with_score(query, k=k, filter=search_filter)
         except Exception as exc:
             raise VectorStoreError(f"Vector similarity search failed: {exc}") from exc
@@ -104,6 +113,8 @@ class VectorStoreService:
                     Document(page_content=text, metadata=meta)
                     for text, meta in zip(doc_texts, metadatas)
                 ]
+                if filter_user_id is not None:
+                    docs = [d for d in docs if d.metadata and d.metadata.get("user_id") == filter_user_id]
                 if filter_source:
                     docs = [d for d in docs if d.metadata and d.metadata.get("source") == filter_source]
                 
@@ -151,29 +162,39 @@ class VectorStoreService:
         return scored
 
     def count(self) -> int:
-        """Return the number of chunks currently stored."""
+        """Return the total number of chunks currently stored in vector DB."""
         try:
             return self._store._collection.count()
         except Exception as exc:  # pragma: no cover - defensive
             raise VectorStoreError(f"Failed to count documents: {exc}") from exc
 
-    def delete_document(self, filename: str) -> None:
-        """Delete all chunks associated with a specific filename.
+    def delete_document(self, filename: str, user_id: int) -> list[str]:
+        """Delete all chunks associated with a specific filename and user ID.
 
-        Args:
-            filename: The original filename of the document to delete.
+        Returns a list of physical stored filenames (unique uuid prefix) to unlink from disk.
         """
         try:
-            # Bypass buggy LangChain wrapper and call underlying collection directly
-            self._store._collection.delete(where={"source": filename})
-            logger.info("Deleted document '%s' from ChromaDB", filename)
+            # Query collection to find the stored physical filenames
+            result = self._store.get(
+                where={"$and": [{"source": filename}, {"user_id": user_id}]},
+                include=["metadatas"]
+            )
+            metadatas = result.get("metadatas", [])
+            stored_files = {m["stored_filename"] for m in metadatas if m and "stored_filename" in m}
+
+            # Delete vector records from ChromaDB
+            self._store._collection.delete(
+                where={"$and": [{"source": filename}, {"user_id": user_id}]}
+            )
+            logger.info("Deleted document '%s' for user %d from ChromaDB", filename, user_id)
+            return list(stored_files)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete document '{filename}': {exc}") from exc
 
-    def list_documents(self) -> list[str]:
-        """List unique source filenames currently stored in ChromaDB."""
+    def list_documents(self, user_id: int) -> list[str]:
+        """List unique source filenames currently stored in ChromaDB for a specific user."""
         try:
-            result = self._store.get(include=["metadatas"])
+            result = self._store.get(where={"user_id": user_id}, include=["metadatas"])
             metadatas = result.get("metadatas", [])
             sources = {m["source"] for m in metadatas if m and "source" in m}
             return sorted(list(sources))

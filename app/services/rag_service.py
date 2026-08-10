@@ -78,20 +78,20 @@ class RAGService:
             question, history=history, top_k=top_k, selected_document=selected_document
         )
 
-    def list_documents(self) -> list[str]:
-        """List unique source filenames currently stored in ChromaDB."""
-        return self._vector_store.list_documents()
+    def list_documents(self, user_id: int) -> list[str]:
+        """List unique source filenames currently stored in ChromaDB for a specific user."""
+        return self._vector_store.list_documents(user_id)
 
-    def delete_document(self, filename: str) -> None:
+    def delete_document(self, filename: str, user_id: int) -> None:
         """Delete all chunks for a document from vector store and remove physical file from disk."""
-        # Delete from ChromaDB
-        self._vector_store.delete_document(filename)
+        # Delete from ChromaDB (returns the unique stored filenames uploaded by this user)
+        stored_files = self._vector_store.delete_document(filename, user_id)
 
         # Delete physical file(s)
         upload_dir = self._settings.pdf_upload_dir_resolved
         if upload_dir.exists():
             for path in upload_dir.iterdir():
-                if path.is_file() and (path.name == filename or path.name.endswith(f"_{filename}")):
+                if path.is_file() and path.name in stored_files:
                     try:
                         path.unlink()
                         logger.info("Deleted physical file: %s", path)

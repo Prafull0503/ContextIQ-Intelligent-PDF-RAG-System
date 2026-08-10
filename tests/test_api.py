@@ -33,21 +33,21 @@ class FakeRAGService:
     def document_count(self) -> int:
         return self._count
 
-    def ingest_pdf(self, pdf_path: Path, original_filename: str) -> IngestionResult:
+    def ingest_pdf(self, pdf_path: Path, original_filename: str, user_id: int) -> IngestionResult:
         self._count += 3
         if original_filename not in self.documents:
             self.documents.append(original_filename)
         return IngestionResult(filename=original_filename, pages=2, chunks_created=3)
 
-    def list_documents(self) -> list[str]:
+    def list_documents(self, user_id: int) -> list[str]:
         return self.documents
 
-    def delete_document(self, filename: str) -> None:
+    def delete_document(self, filename: str, user_id: int) -> None:
         if filename in self.documents:
             self.documents.remove(filename)
             self._count = max(0, self._count - 3)
 
-    def ask(self, question: str, history=None, top_k=None, selected_document=None) -> RAGAnswer:
+    def ask(self, question: str, history=None, top_k=None, selected_document=None, user_id=None) -> RAGAnswer:
         if self._count == 0:
             raise NoDocumentsError("No documents have been indexed yet.")
         doc = Document(
@@ -65,7 +65,14 @@ class FakeRAGService:
 def client() -> TestClient:
     app = create_app()
     fake = FakeRAGService()
+    
+    from app.api.routes import get_current_user
+    from app.models.schemas import User
+    mock_user = User(id=1, email="test@test.com", hashed_password="fake", username="testuser")
+    
     app.dependency_overrides[get_rag_service] = lambda: fake
+    app.dependency_overrides[get_current_user] = lambda: mock_user
+    
     return TestClient(app)
 
 

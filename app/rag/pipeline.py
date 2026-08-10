@@ -125,6 +125,7 @@ class RAGPipeline:
         history: list[dict] | None = None,
         top_k: int | None = None,
         selected_document: str | None = None,
+        user_id: int | None = None,
     ) -> RAGAnswer:
         """Answer a question from the indexed documents.
 
@@ -133,6 +134,7 @@ class RAGPipeline:
             history: Previous messages in the conversation.
             top_k: Optional override for the number of chunks to retrieve.
             selected_document: Optional document source filename to filter by.
+            user_id: Optional user ID to isolate context search.
 
         Returns:
             A :class:`RAGAnswer` with the answer, source chunks and confidence.
@@ -177,7 +179,7 @@ class RAGPipeline:
         # Fetch more candidates to enable effective re-ranking
         initial_k = max(20, k * 3)
         retrieved = self._vector_store.similarity_search(
-            standalone_question, k=initial_k, filter_source=selected_document
+            standalone_question, k=initial_k, filter_source=selected_document, filter_user_id=user_id
         )
         chunks = [RetrievedChunk(document=doc, score=score) for doc, score in retrieved]
 

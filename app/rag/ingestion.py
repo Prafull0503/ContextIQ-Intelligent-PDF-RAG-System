@@ -56,12 +56,13 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def ingest(self, pdf_path: Path, original_filename: str) -> IngestionResult:
+    def ingest(self, pdf_path: Path, original_filename: str, user_id: int) -> IngestionResult:
         """Run the full ingestion pipeline for one document.
 
         Args:
             pdf_path: Path to the document file on disk.
             original_filename: The name to record as the chunk source.
+            user_id: The active user ID.
 
         Returns:
             An :class:`IngestionResult` summarising what was stored.
@@ -74,7 +75,7 @@ class IngestionPipeline:
 
         pages = self._load(pdf_path, original_filename)
         cleaned_pages = self._clean(pages, original_filename)
-        chunks = self._chunk(cleaned_pages, original_filename)
+        chunks = self._chunk(cleaned_pages, original_filename, user_id, pdf_path.name)
 
         stored = self._vector_store.add_documents(chunks)
         logger.info(
@@ -136,7 +137,7 @@ class IngestionPipeline:
             )
         return cleaned
 
-    def _chunk(self, pages: list[Document], filename: str) -> list[Document]:
+    def _chunk(self, pages: list[Document], filename: str, user_id: int, stored_filename: str) -> list[Document]:
         """Step 3: Split pages into overlapping chunks with rich metadata."""
         chunks = self._splitter.split_documents(pages)
 
@@ -145,6 +146,8 @@ class IngestionPipeline:
             page_number = chunk.metadata.get("page")
             meta = {
                 "source": filename,
+                "stored_filename": stored_filename,
+                "user_id": user_id,
                 "chunk_index": index,
             }
             if page_number is not None:

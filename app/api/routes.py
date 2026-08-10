@@ -1,24 +1,26 @@
 """FastAPI route definitions.
 
 Endpoints:
-    POST /upload-pdf  -> ingest a PDF into the vector store
-    POST /ask         -> answer a question from indexed PDFs
-    GET  /health      -> liveness + index status
-
-The CPU/IO-bound work (PDF parsing, embedding, LLM calls) is synchronous, so
-the async endpoints offload it to a worker thread via ``run_in_threadpool``.
-This keeps the event loop responsive and the endpoints genuinely async.
+    POST /auth/signup -> register a user
+    POST /auth/login  -> authenticate and obtain JWT token
+    POST /upload      -> ingest a document (isolated by user)
+    POST /ask         -> answer a question grounded in user-specific documents
+    GET  /documents   -> list user documents
+    DELETE /documents -> delete user document
 """
 
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from sqlmodel import Session, select
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, UploadFile, status, HTTPException
+from fastapi.security import OAuth2PasswordBearer
 from starlette.concurrency import run_in_threadpool
 
 from app.core.logging_config import get_logger
+from app.core.database import get_db
 from app.models.schemas import (
     AskRequest,
     AskResponse,
@@ -27,9 +29,15 @@ from app.models.schemas import (
     DocumentListResponse,
     DeleteDocumentResponse,
     SourceChunkSchema,
+    User,
+    UserSignup,
+    UserLogin,
+    TokenResponse,
+    UserResponse,
 )
 from app.services.rag_service import RAGService, get_rag_service
 from app.utils.exceptions import InvalidPDFError
+from app.utils.auth import hash_password, verify_password, create_access_token, decode_access_token
 
 logger = get_logger(__name__)
 
@@ -37,6 +45,85 @@ router = APIRouter()
 
 _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB upload cap.
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    """Security dependency to fetch the logged-in user from the JWT token."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    email = decode_access_token(token)
+    if email is None:
+        raise credentials_exception
+    
+    user = db.exec(select(User).where(User.email == email)).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Auth Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/auth/signup",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["auth"],
+)
+async def signup(
+    payload: UserSignup,
+    db: Session = Depends(get_db),
+) -> UserResponse:
+    """Register a new user in the SQL database."""
+    existing = db.exec(select(User).where(User.email == payload.email)).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+    
+    hashed = hash_password(payload.password)
+    user = User(email=payload.email, hashed_password=hashed, username=payload.username)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    logger.info("Successfully registered user: %s", user.email)
+    return UserResponse(id=user.id, email=user.email, username=user.username, created_at=user.created_at)
+
+
+@router.post(
+    "/auth/login",
+    response_model=TokenResponse,
+    tags=["auth"],
+)
+async def login(
+    payload: UserLogin,
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Verify user credentials and return a JWT access token."""
+    user = db.exec(select(User).where(User.email == payload.email)).first()
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    token = create_access_token(subject=user.email)
+    logger.info("User logged in successfully: %s", user.email)
+    return TokenResponse(access_token=token, username=user.username)
+
+
+# ---------------------------------------------------------------------------
+# Health / System
+# ---------------------------------------------------------------------------
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
 async def health(
@@ -50,6 +137,10 @@ async def health(
         documents_indexed=await run_in_threadpool(service.document_count),
     )
 
+
+# ---------------------------------------------------------------------------
+# RAG Endpoints (Secured)
+# ---------------------------------------------------------------------------
 
 @router.post(
     "/upload",
@@ -67,8 +158,9 @@ async def health(
 async def upload_file(
     file: UploadFile = File(..., description="A document to ingest."),
     service: RAGService = Depends(get_rag_service),
+    current_user: User = Depends(get_current_user),
 ) -> UploadResponse:
-    """Upload a document, ingest it, and persist its embeddings to ChromaDB."""
+    """Upload a document, ingest it, and isolate its metadata under active user_id."""
     filename = file.filename or "uploaded.pdf"
 
     # --- Basic validation before doing any expensive work ---
@@ -98,10 +190,10 @@ async def upload_file(
     upload_dir: Path = service.settings.pdf_upload_dir_resolved
     stored_path = upload_dir / f"{uuid.uuid4().hex}_{filename}"
     await run_in_threadpool(stored_path.write_bytes, contents)
-    logger.info("Saved upload '%s' -> %s", filename, stored_path)
+    logger.info("Saved upload '%s' -> %s for User %d", filename, stored_path, current_user.id)
 
-    # --- Ingest (offloaded to a thread; it's CPU/IO bound) ---
-    result = await run_in_threadpool(service.ingest_pdf, stored_path, filename)
+    # --- Ingest (offloaded to a thread; passes user_id) ---
+    result = await run_in_threadpool(service.ingest_pdf, stored_path, filename, current_user.id)
 
     return UploadResponse(
         message="Document processed successfully",
@@ -118,9 +210,10 @@ async def upload_file(
 )
 async def list_documents(
     service: RAGService = Depends(get_rag_service),
+    current_user: User = Depends(get_current_user),
 ) -> DocumentListResponse:
-    """Get the list of unique filenames currently indexed in the vector store."""
-    docs = await run_in_threadpool(service.list_documents)
+    """Get the list of unique filenames currently indexed by the current user."""
+    docs = await run_in_threadpool(service.list_documents, current_user.id)
     return DocumentListResponse(documents=docs)
 
 
@@ -132,9 +225,10 @@ async def list_documents(
 async def delete_document(
     filename: str,
     service: RAGService = Depends(get_rag_service),
+    current_user: User = Depends(get_current_user),
 ) -> DeleteDocumentResponse:
-    """Delete a document from the vector store and its physical file on disk."""
-    await run_in_threadpool(service.delete_document, filename)
+    """Delete user's document from the vector store and its physical file on disk."""
+    await run_in_threadpool(service.delete_document, filename, current_user.id)
     return DeleteDocumentResponse(
         message="Document deleted successfully",
         filename=filename,
@@ -145,11 +239,17 @@ async def delete_document(
 async def ask(
     payload: AskRequest,
     service: RAGService = Depends(get_rag_service),
+    current_user: User = Depends(get_current_user),
 ) -> AskResponse:
-    """Answer a question grounded in the uploaded document content."""
+    """Answer a question grounded strictly in user's isolated documents."""
     history_dicts = [msg.model_dump() for msg in payload.history]
     result = await run_in_threadpool(
-        service.ask, payload.question, history_dicts, payload.top_k, payload.selected_document
+        service.ask,
+        payload.question,
+        history_dicts,
+        payload.top_k,
+        payload.selected_document,
+        current_user.id,
     )
     
     sources = []
