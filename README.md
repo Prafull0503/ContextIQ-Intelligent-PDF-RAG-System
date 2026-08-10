@@ -1,26 +1,19 @@
-# ContextIQ
+# ContextIQ - Advanced RAG & Multi-Doc Chat System
 
-A production-ready **Retrieval-Augmented Generation** service. Upload PDF
-documents, and the system extracts → cleans → chunks → embeds the text, stores
-the vectors in a **persistent ChromaDB**, and answers questions **grounded only
-in the uploaded content** using an LLM (OpenAI **or** Google Gemini — selectable
-via environment variables, no code changes).
+ContextIQ is an enterprise-grade, production-ready **Retrieval-Augmented Generation (RAG)** system. Upload files (.pdf, .docx, .txt, .csv), switch focus between documents in real-time, and chat with their content through a modern Obsidian Nebula dashboard.
 
 ---
 
-## ✨ Features
+## ✨ Advanced Features
 
-- **PDF ingestion pipeline** — load, clean, chunk (`RecursiveCharacterTextSplitter`), embed, persist.
-- **Pluggable providers** — OpenAI / Gemini / Ollama for the LLM; OpenAI / Gemini / HuggingFace / Ollama for embeddings.
-- **Persistent vector store** — ChromaDB on local disk; survives restarts.
-- **Grounded answers** — the model is instructed to answer *only* from retrieved context.
-- **Source tracking** — every answer returns the source chunks (filename + page + similarity score).
-- **Confidence score** — derived from retrieval similarity.
-- **Multiple PDFs** — ingest as many as you like into one collection.
-- **Async FastAPI** — blocking work offloaded to a thread pool.
-- **Robust error handling** — invalid/empty PDFs, missing API keys, vector-DB and LLM failures → proper HTTP status codes.
-- **Structured logging** — across upload, chunking, embedding, retrieval and generation.
-- **Typed & modular** — Pydantic models, type hints, SOLID service layer, tests.
+* **Multi-Format Ingestion** — Dynamic support for loading and parsing PDF, DOCX, TXT, and CSV formats.
+* **Single Document Focus** — Selectively query a single file from your history. Queries are strictly filtered in ChromaDB using metadata tags (`source`).
+* **Conversational Memory** — Multi-turn chat support with contextual query condensation (LLM-based question rewriting).
+* **Hybrid Search (Vector + BM25)** — Merges semantic vector similarities and lexical keyword ranks using Reciprocal Rank Fusion (RRF).
+* **Cross-Encoder Re-ranking** — Lazy loads a local deep-learning cross-encoder model (`ms-marco-MiniLM-L-6-v2`) to re-score and re-sort retrieved chunks.
+* **Web Search Fallback** — Automatically routes queries to DuckDuckGo search if matching document context is missing or similarity is low.
+* **Document Management** — Instantly list indexed documents and delete them (clearing vectors from ChromaDB and unlinking physical storage from disk).
+* **Obsidian Nebula Dashboard** — A 100% responsive, glassy frontend layout supporting drag-and-drop uploads, scroll timelines, mobile drawer menus, and grounding citations overlays.
 
 ---
 
@@ -28,251 +21,180 @@ via environment variables, no code changes).
 
 ```
                          ┌──────────────────────────────────────────┐
-                         │                FastAPI                    │
-                         │   /upload-pdf      /ask       /health      │
-                         └───────┬───────────────┬───────────────────┘
+                         │               Next.js UI                 │
+                         │    (Obsidian Nebula Dashboard Layout)    │
+                         └───────────────────┬──────────────────────┘
+                                             │
+                         ┌───────────────────▼──────────────────────┐
+                         │               FastAPI API                │
+                         │    /upload     /ask    /documents (G/D)  │
+                         └───────┬───────────────┬──────────────────┘
                                  │               │
                   ┌──────────────▼──┐        ┌───▼───────────────┐
    INGEST (write) │ IngestionPipeline│  ASK  │   RAGPipeline      │ (read)
                   └──────────────┬──┘        └───┬───────────────┘
-   load PDF                      │               │  embed question
-   clean text                   │               │  similarity search (top-K)
-   chunk (overlap)              │               │  inject context → LLM
-   embed                        │               │  grounded answer + sources
-        │                       │               │        │
-        ▼                       ▼               ▼         ▼
-  ┌───────────┐         ┌────────────────────────┐   ┌─────────┐
-  │ Embeddings│◄────────┤      ChromaDB           │   │   LLM   │
-  │ OpenAI /  │         │  (persistent on disk)   │   │ OpenAI /│
-  │ HuggingFace│        └────────────────────────┘   │ Gemini  │
-  └───────────┘                                       └─────────┘
+   PDF Loader / Word Loader /    │               │  Condense Question
+   CSV & TXT Loader              │               │  Hybrid Search (Vector + BM25)
+   Clean Text & Chunker          │               │  Cross-Encoder Rerank
+   Embed                         │               │  DuckDuckGo Fallback (optional)
+        │                        │               │  Ground generation
+        ▼                        ▼               ▼        │
+   ┌───────────┐         ┌────────────────────────┐  ┌────▼────┐
+   │ Embeddings│◄────────┤      ChromaDB           │  │   LLM   │
+   │ OpenAI /  │         │  (persistent on disk)   │  │ OpenAI /│
+   │ Gemini /  │         └────────────────────────┘  │ Gemini  │
+   │ HuggingFace│                                    └─────────┘
+   └───────────┘
 ```
 
-### Project structure
+---
+
+## 📁 Project Structure
 
 ```
 ContextIQ/
 ├── app/
-│   ├── api/              # FastAPI routers
+│   ├── api/              # API endpoints (Upload, Ask, Documents list/delete)
 │   │   └── routes.py
-│   ├── application.py    # App factory: lifespan, CORS, exception handlers
-│   ├── core/             # Config (pydantic-settings) + logging
+│   ├── application.py    # Startup lifespan, CORS, and exception routers
+│   ├── core/             # Configuration & logging setups
 │   │   ├── config.py
 │   │   └── logging_config.py
-│   ├── models/           # Pydantic request/response schemas
+│   ├── models/           # Request/response models
 │   │   └── schemas.py
-│   ├── rag/              # RAG pipelines
-│   │   ├── ingestion.py  # write path: load→clean→chunk→embed→store
-│   │   └── pipeline.py   # read path: retrieve→inject→generate
-│   ├── services/         # Reusable services / composition root
+│   ├── rag/              # Ingestion & generation pipelines
+│   │   ├── ingestion.py  # Loader routing & clean text chunker
+│   │   └── pipeline.py   # Condensation, Reranking, and Web Fallback
+│   ├── services/         # Service composition layers
 │   │   ├── embedding_service.py
 │   │   ├── llm_service.py
 │   │   ├── vectorstore_service.py
 │   │   └── rag_service.py
-│   └── utils/            # Text cleaning + domain exceptions
+│   └── utils/            # Domain exceptions and cleaners
 │       ├── exceptions.py
 │       └── text_cleaning.py
+├── frontend/             # Next.js (TypeScript / Tailwind) Dashboard UI
+│   ├── src/app/
+│   │   ├── page.tsx      # Main layout component
+│   │   └── globals.css   # Dark Obsidian styles & mobile drawer media
+│   └── src/lib/api.ts    # Frontend API client
 ├── data/
-│   ├── pdfs/             # Uploaded PDFs
-│   └── chroma_db/        # Persistent vector store
-├── tests/
-├── .env / .env.example
-├── requirements.txt
-├── main.py
+│   ├── pdfs/             # Local upload storage
+│   └── chroma_db/        # Persistent vector store database
+├── tests/                # Pytest suites
+├── requirements.txt      # Python dependencies
+├── main.py               # Backend entry point
 └── README.md
 ```
 
 ---
 
-## 🚀 Setup
+## 🚀 Setup & Installation
 
-> Requires **Python 3.13+**.
+### 1. Backend Setup (FastAPI)
 
-### 1. Create & activate a virtual environment
+Requires **Python 3.13+**.
 
 ```bash
-# macOS / Linux
+# Activate virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
-# Windows (PowerShell)
-python -m venv venv
-venv\Scripts\activate
-```
-
-### 2. Install dependencies
-
-```bash
-pip install --upgrade pip
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### 3. Configure environment
-
-```bash
+# Configure environment variables
 cp .env.example .env
-```
 
-The defaults run **fully locally via Ollama** — no API key required. Install
-[Ollama](https://ollama.com), then pull the models:
-
-```bash
-ollama serve                  # start the local server
-ollama pull llama3.1          # LLM
-ollama pull nomic-embed-text  # embeddings
-```
-
-To use a cloud provider instead, set `LLM_PROVIDER=openai` + `OPENAI_API_KEY`
-(or `LLM_PROVIDER=gemini` + `GOOGLE_API_KEY`) in `.env`.
-
-### 4. Run the server
-
-```bash
+# Run FastAPI
 uvicorn main:app --reload
 ```
+Interactive API docs are available at **http://localhost:8000/docs**.
 
-Open the interactive docs at **http://localhost:8000/docs**.
+### 2. Frontend Setup (Next.js)
 
----
+Requires **Node.js 18+**.
 
-## ⚙️ Environment variables
+```bash
+cd frontend
 
-| Variable | Description | Example |
-|---|---|---|
-| `LLM_PROVIDER` | LLM backend: `openai`, `gemini` or `ollama` | `ollama` |
-| `EMBEDDING_PROVIDER` | Embeddings backend: `openai`, `gemini`, `huggingface` or `ollama` | `gemini` |
-| `OPENAI_API_KEY` | OpenAI key (only if using OpenAI) | `sk-...` |
-| `GOOGLE_API_KEY` | Google key (only if using Gemini) | `AIza...` |
-| `OLLAMA_BASE_URL` | Ollama server URL (only if using Ollama) | `http://localhost:11434` |
-| `LLM_MODEL` | Chat model name | `llama3.1` / `gpt-4o-mini` / `gemini-flash-latest` |
-| `EMBEDDING_MODEL` | Embedding model name | `nomic-embed-text` / `text-embedding-3-small` |
-| `CHROMA_DB_PATH` | Persistent vector-store dir | `./data/chroma_db` |
-| `CHROMA_COLLECTION_NAME` | Collection name | `rag_documents` |
-| `CHUNK_SIZE` | Characters per chunk | `1000` |
-| `CHUNK_OVERLAP` | Overlap between chunks | `150` |
-| `PDF_UPLOAD_DIR` | Where uploads are stored | `./data/pdfs` |
-| `RETRIEVAL_TOP_K` | Chunks retrieved per query | `5` |
-| `LLM_TEMPERATURE` | Generation temperature | `0.0` |
-| `LLM_MAX_TOKENS` | Max output tokens | `1024` |
-| `LOG_LEVEL` | Logging level | `INFO` |
+# Install package dependencies
+npm install
+
+# Start the dev server
+npm run dev
+```
+Open **http://localhost:3000** in your browser to load the dashboard.
 
 ---
 
-## 📡 API usage
+## 📡 API Usage
 
 ### `GET /health`
-
+Returns system heartbeat, active embedding/LLM providers, and indexed counts.
 ```bash
 curl http://localhost:8000/health
 ```
 
-```json
-{
-  "status": "healthy",
-  "llm_provider": "openai",
-  "embedding_provider": "huggingface",
-  "documents_indexed": 42
-}
-```
-
-### `POST /upload-pdf`
-
+### `POST /upload`
+Ingests a PDF, DOCX, TXT, or CSV file.
 ```bash
-curl -X POST http://localhost:8000/upload-pdf \
-  -F "file=@/path/to/document.pdf"
+curl -X POST http://localhost:8000/upload \
+  -F "file=@/path/to/resume.docx"
 ```
 
-```json
-{
-  "message": "PDF processed successfully",
-  "filename": "document.pdf",
-  "chunks_created": 18,
-  "pages": 12
-}
+### `GET /documents`
+Lists unique filenames currently indexed in the system.
+```bash
+curl http://localhost:8000/documents
+```
+
+### `DELETE /documents/{filename}`
+Deletes a document from the vector store and unlinks it from disk storage.
+```bash
+curl -X DELETE http://localhost:8000/documents/resume.docx
 ```
 
 ### `POST /ask`
-
+Queries the grounded RAG pipeline. Accepts conversational history and a focused document source name.
 ```bash
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is this document about?"}'
+  -d '{
+    "question": "What is my name?",
+    "selected_document": "resume.docx",
+    "history": [
+      {"role": "user", "content": "Hello!"},
+      {"role": "assistant", "content": "Hi, how can I help you today?"}
+    ]
+  }'
 ```
 
-```json
-{
-  "answer": "The document describes ...",
-  "sources": [
-    {
-      "content": "…retrieved chunk text…",
-      "source": "document.pdf",
-      "page": 3,
-      "score": 0.83
-    }
-  ],
-  "confidence": 0.81
-}
-```
+---
 
-You may override retrieval depth per request:
+## 🧪 Running Tests
 
+To run the automated backend test suite, run:
 ```bash
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Summarise section 2", "top_k": 8}'
+venv/bin/pytest -v
 ```
 
 ---
 
-## 🧪 Tests
+## 🔁 Switching Providers (no code changes)
 
-```bash
-pytest -q
-```
+Configure cloud APIs or run fully local setups by updating `.env`:
 
-The API tests override the service with a fake, so they run fast and need no
-API keys or model downloads.
-
----
-
-## 🛠️ Troubleshooting
-
-| Symptom | Cause / Fix |
-|---|---|
-| `OPENAI_API_KEY is required ...` (HTTP 500) | Set the key in `.env`, or switch `LLM_PROVIDER`/`EMBEDDING_PROVIDER`. |
-| `409 No documents have been indexed yet` | Upload a PDF via `/upload-pdf` before asking. |
-| `422 ... no extractable text` | The PDF is image-only/scanned — it needs OCR before ingestion. |
-| `400 Only .pdf files are accepted` | Upload a valid `.pdf`. |
-| First startup is slow | HuggingFace downloads the embedding model once, then caches it. |
-| `Connection refused` to `localhost:11434` | Ollama isn't running — start it with `ollama serve`. |
-| `model "..." not found` (Ollama) | Pull it first: `ollama pull llama3.1` and `ollama pull nomic-embed-text`. |
-| `502 LLM failed to generate an answer` | Check API key validity, model name, and network/quota. |
-| Answers ignore my new PDF | Confirm `/upload-pdf` returned `201` and `documents_indexed` increased on `/health`. |
-| Want a clean index | Stop the server and delete the `data/chroma_db/` directory. |
-
----
-
-## 🔁 Switching providers (no code changes)
-
-**Gemini-only (single API key for both LLM and embeddings — no local models):**
-
+**Google Gemini Setup (Cloud):**
 ```env
 LLM_PROVIDER=gemini
 EMBEDDING_PROVIDER=gemini
-GOOGLE_API_KEY=AIza...
+GOOGLE_API_KEY=AIzaSy...
 LLM_MODEL=gemini-flash-latest
 EMBEDDING_MODEL=models/gemini-embedding-001
 ```
 
-**Fully local with Ollama (no API key):**
-
-```bash
-# 1. Install Ollama from https://ollama.com, then:
-ollama serve
-ollama pull llama3.1          # the LLM
-ollama pull nomic-embed-text  # the embedding model
-```
-
+**Ollama Setup (Fully Local):**
 ```env
 LLM_PROVIDER=ollama
 EMBEDDING_PROVIDER=ollama
@@ -280,28 +202,3 @@ OLLAMA_BASE_URL=http://localhost:11434
 LLM_MODEL=llama3.1
 EMBEDDING_MODEL=nomic-embed-text
 ```
-
-**Use Gemini for generation, HuggingFace for embeddings (no OpenAI key):**
-
-```env
-LLM_PROVIDER=gemini
-EMBEDDING_PROVIDER=huggingface
-GOOGLE_API_KEY=AIza...
-LLM_MODEL=gemini-flash-latest
-EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-```
-
-**All-OpenAI:**
-
-```env
-LLM_PROVIDER=openai
-EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-LLM_MODEL=gpt-4o-mini
-EMBEDDING_MODEL=text-embedding-3-small
-```
-
-> **Note:** embeddings define the vector space. If you change
-> `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL` after ingesting, delete
-> `data/chroma_db/` and re-upload your PDFs so the index is rebuilt
-> consistently.
