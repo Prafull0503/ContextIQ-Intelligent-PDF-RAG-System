@@ -217,23 +217,33 @@ class RAGPipeline:
         fallback_triggered = not chunks
 
         if chunks:
-            # --- Re-ranking using Cross-Encoder ---
-            try:
-                reranker = self._get_reranker()
-                pairs = [[standalone_question, c.document.page_content] for c in chunks]
-                rerank_scores = reranker.predict(pairs)
+            # --- Re-ranking using Cross-Encoder (optional) ---
+            # Skippable via settings.enable_reranker: loading the
+            # cross-encoder model is memory-heavy (sentence-transformers +
+            # torch) and can OOM-kill the process on constrained hosts. When
+            # disabled, we keep the hybrid (vector + BM25 RRF) ordering the
+            # vector store already returned -- reasonable retrieval quality
+            # without the extra memory cost.
+            if self._settings.enable_reranker:
+                try:
+                    reranker = self._get_reranker()
+                    pairs = [[standalone_question, c.document.page_content] for c in chunks]
+                    rerank_scores = reranker.predict(pairs)
 
-                for chunk, raw_score in zip(chunks, rerank_scores):
-                    # Sigmoid function to map logit scores to [0, 1] range
-                    sig_score = 1.0 / (1.0 + math.exp(-float(raw_score)))
-                    chunk.score = round(sig_score, 4)
+                    for chunk, raw_score in zip(chunks, rerank_scores):
+                        # Sigmoid function to map logit scores to [0, 1] range
+                        sig_score = 1.0 / (1.0 + math.exp(-float(raw_score)))
+                        chunk.score = round(sig_score, 4)
 
-                chunks = sorted(chunks, key=lambda x: x.score, reverse=True)
+                    chunks = sorted(chunks, key=lambda x: x.score, reverse=True)
+                    chunks = chunks[:k]
+                    logger.info("Re-ranking complete. Retained top-%d chunks.", len(chunks))
+                except Exception as exc:
+                    logger.warning("Re-ranking failed, falling back to original retriever rankings: %s", exc)
+                    chunks = chunks[:k]
+            else:
                 chunks = chunks[:k]
-                logger.info("Re-ranking complete. Retained top-%d chunks.", len(chunks))
-            except Exception as exc:
-                logger.warning("Re-ranking failed, falling back to original retriever rankings: %s", exc)
-                chunks = chunks[:k]
+                logger.info("Reranker disabled (ENABLE_RERANKER=false); using hybrid retrieval order.")
 
             # --- Context injection ---
             context = self._format_context(chunks)

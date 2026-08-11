@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     # ---- Retrieval ----
     retrieval_top_k: int = Field(default=5, gt=0)
 
+    # Cross-encoder reranking loads sentence-transformers + a torch model
+    # into memory on first query (few hundred MB+). On memory-constrained
+    # hosts (e.g. Render's free 512MB tier) this can OOM-kill the process
+    # mid-request with no catchable Python exception. Set to false on such
+    # hosts to skip reranking and use the hybrid (vector + BM25 RRF) order
+    # as-is -- still solid retrieval quality, just without the rerank pass.
+    enable_reranker: bool = True
+
     # ---- LLM generation ----
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     llm_max_tokens: int = Field(default=1024, gt=0)
