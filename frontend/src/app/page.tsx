@@ -9,10 +9,16 @@ import {
   getDocuments,
   deleteDocument,
   logout,
+  ApiError,
   type HealthResponse,
   type Message,
   type SourceChunk,
 } from "@/lib/api";
+
+// Must stay comfortably under the backend's AskRequest.history max_length
+// (50, see app/models/schemas.py) so a long-running chat never starts
+// failing every request once it crosses that cap.
+const MAX_HISTORY_MESSAGES = 20;
 
 export default function Home() {
   const router = useRouter();
@@ -53,20 +59,30 @@ export default function Home() {
     }
   }, [router]);
 
+  // Shared handler: if a request failed because the session is gone
+  // (expired/invalid token), bounce to /login instead of showing a
+  // confusing error in place. Returns true if it handled the error.
+  const handleSessionExpiry = useCallback(
+    (err: unknown): boolean => {
+      if (err instanceof ApiError && err.status === 401) {
+        logout();
+        router.push("/login");
+        return true;
+      }
+      return false;
+    },
+    [router],
+  );
+
   const refreshHealth = useCallback(async () => {
     try {
       setHealth(await getHealth());
       setHealthError(null);
     } catch (err) {
-      if (err instanceof Error && err.message.includes("401")) {
-        // Token expired/invalid, logout and redirect
-        logout();
-        router.push("/login");
-        return;
-      }
+      if (handleSessionExpiry(err)) return;
       setHealthError(err instanceof Error ? err.message : "Backend unreachable");
     }
-  }, [router]);
+  }, [handleSessionExpiry]);
 
   const refreshDocuments = useCallback(async () => {
     try {
@@ -77,14 +93,10 @@ export default function Home() {
         return res.documents[0] || null;
       });
     } catch (err) {
-      if (err instanceof Error && err.message.includes("401")) {
-        logout();
-        router.push("/login");
-        return;
-      }
+      if (handleSessionExpiry(err)) return;
       console.error("Failed to fetch documents list:", err);
     }
-  }, [router]);
+  }, [handleSessionExpiry]);
 
   useEffect(() => {
     if (authChecked) {
@@ -114,6 +126,7 @@ export default function Home() {
         setUploadNote(null);
       }, 5000);
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setUploading(false);
@@ -131,6 +144,7 @@ export default function Home() {
       await refreshHealth();
       await refreshDocuments();
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       alert(err instanceof Error ? err.message : "Failed to delete document");
     }
   }
@@ -145,8 +159,12 @@ export default function Home() {
     setQuestion("");
     setAsking(true);
     try {
-      // Send previous messages list as history context & active document filter
-      const res = await ask(q, messages, undefined, activeDocument);
+      // Send recent conversation as history context. Capped at
+      // MAX_HISTORY_MESSAGES so it never exceeds the backend's validation
+      // limit -- older turns are dropped rather than causing every
+      // subsequent question to start failing.
+      const recentHistory = messages.slice(-MAX_HISTORY_MESSAGES);
+      const res = await ask(q, recentHistory, undefined, activeDocument);
       setMessages((prev) => [
         ...prev,
         {
@@ -157,6 +175,7 @@ export default function Home() {
         },
       ]);
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -300,11 +319,11 @@ export default function Home() {
               <p className="text-xs text-foreground/35 italic py-2">No documents indexed yet.</p>
             ) : (
               <ul className="space-y-1.5 max-h-48 overflow-y-auto scroll-slim">
-                {documents.map((doc, idx) => {
+                {documents.map((doc) => {
                   const isActive = doc === activeDocument;
                   return (
                     <li
-                      key={idx}
+                      key={doc}
                       className={`flex items-center justify-between gap-3 rounded-lg transition px-2.5 py-1.5 text-xs border ${
                         isActive
                           ? "border-cyan-500/30 bg-cyan-500/5 ring-1 ring-cyan-500/10 text-cyan-200"
@@ -401,9 +420,20 @@ export default function Home() {
               </span>
             )}
           </div>
-          <span className="text-[10px] text-foreground/40 font-mono shrink-0">
-            {messages.length} message{messages.length !== 1 ? "s" : ""}
-          </span>
+          <div className="flex items-center gap-3 shrink-0">
+            <span className="text-[10px] text-foreground/40 font-mono hidden sm:inline">
+              {messages.length} message{messages.length !== 1 ? "s" : ""}
+            </span>
+            {messages.length > 0 && (
+              <button
+                onClick={() => setMessages([])}
+                className="text-[10px] font-semibold text-red-400/90 hover:text-red-300 bg-red-500/10 hover:bg-red-500/15 border border-red-500/20 rounded-lg px-2.5 py-1 transition cursor-pointer"
+                title="Clear current chat history"
+              >
+                Clear Chat
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Chat Messages Scrolling Box */}
