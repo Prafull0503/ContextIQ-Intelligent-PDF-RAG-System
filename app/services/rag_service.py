@@ -11,6 +11,7 @@ for the lifetime of the process.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
@@ -36,9 +37,12 @@ class RAGService:
         self._vector_store = VectorStoreService(self._settings, self._embeddings)
 
         # The LLM is built lazily so that PDF ingestion works even before an
-        # LLM API key is configured.
+        # LLM API key is configured. Guarded by a lock so two concurrent
+        # first-time `ask()` calls can't both build (and discard) an LLM
+        # client and pipeline.
         self._llm = None
         self._rag_pipeline: RAGPipeline | None = None
+        self._pipeline_lock = threading.Lock()
 
         self._ingestion = IngestionPipeline(self._settings, self._vector_store)
         logger.info("RAGService initialised.")
@@ -71,10 +75,14 @@ class RAGService:
     ) -> RAGAnswer:
         """Answer a question using the RAG pipeline (building the LLM lazily)."""
         if self._rag_pipeline is None:
-            self._llm = build_llm(self._settings)
-            self._rag_pipeline = RAGPipeline(
-                self._settings, self._vector_store, self._llm
-            )
+            with self._pipeline_lock:
+                # Re-check inside the lock: another thread may have already
+                # built it while we were waiting.
+                if self._rag_pipeline is None:
+                    self._llm = build_llm(self._settings)
+                    self._rag_pipeline = RAGPipeline(
+                        self._settings, self._vector_store, self._llm
+                    )
         return self._rag_pipeline.answer(
             question,
             history=history,
@@ -92,27 +100,37 @@ class RAGService:
         # Delete from ChromaDB (returns the unique stored filenames uploaded by this user)
         stored_files = self._vector_store.delete_document(filename, user_id)
 
-        # Delete physical file(s)
+        # Delete physical file(s). `stored_files` holds the exact on-disk
+        # filenames recorded at ingestion time, so we can target each path
+        # directly instead of scanning the whole upload directory.
         upload_dir = self._settings.pdf_upload_dir_resolved
-        if upload_dir.exists():
-            for path in upload_dir.iterdir():
-                if path.is_file() and path.name in stored_files:
-                    try:
-                        path.unlink()
-                        logger.info("Deleted physical file: %s", path)
-                    except Exception as exc:
-                        logger.warning("Could not delete physical file '%s': %s", path, exc)
+        for stored_name in stored_files:
+            path = upload_dir / stored_name
+            try:
+                path.unlink(missing_ok=True)
+                logger.info("Deleted physical file: %s", path)
+            except Exception as exc:
+                logger.warning("Could not delete physical file '%s': %s", path, exc)
 
 
 # ---------------------------------------------------------------------------
 # Process-wide singleton accessor (used by FastAPI dependency injection).
 # ---------------------------------------------------------------------------
 _service: RAGService | None = None
+_service_lock = threading.Lock()
 
 
 def get_rag_service() -> RAGService:
-    """Return the process-wide :class:`RAGService` singleton."""
+    """Return the process-wide :class:`RAGService` singleton.
+
+    Double-checked locking avoids two concurrent early requests each
+    constructing (and one of them wastefully discarding) a full RAGService --
+    embedding model load, Chroma connection, etc.
+    """
     global _service
     if _service is None:
-        _service = RAGService()
+        with _service_lock:
+            if _service is None:
+                _service = RAGService()
     return _service
+    

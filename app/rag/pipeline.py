@@ -11,6 +11,8 @@ chunks, and the confidence score.
 
 from __future__ import annotations
 
+import math
+import threading
 from dataclasses import dataclass
 
 from langchain_core.documents import Document
@@ -73,6 +75,24 @@ _WEB_SYSTEM_PROMPT = (
 
 _WEB_HUMAN_PROMPT = "Search Results:\n{search_results}\n\nQuestion: {question}\n\nAnswer:"
 
+# Confidence assigned when we fall back to a live web search (the LLM is
+# grounded in fresh external results, not our own vetted, embedded corpus --
+# so we deliberately report lower confidence than a normal in-corpus answer).
+_WEB_FALLBACK_CONFIDENCE = 0.4
+
+
+def _is_not_found(answer: str) -> bool:
+    """Check whether the model's answer is (effectively) the not-found sentinel.
+
+    A plain ``==`` against the exact sentinel string is fragile: a trailing
+    period, different casing, or surrounding quotes -- all things a model can
+    add despite being told to reply "EXACTLY" -- would silently defeat the
+    check and let an unguarded non-answer through as if it were grounded.
+    Comparing normalised (trimmed, lower-cased, unquoted) text is more robust.
+    """
+    normalized = answer.strip().strip('"').strip("'").lower()
+    return normalized == _NOT_FOUND_MESSAGE.lower()
+
 
 @dataclass
 class RetrievedChunk:
@@ -109,14 +129,24 @@ class RAGPipeline:
         # LangChain Expression Language chain: prompt -> llm -> string.
         self._chain = self._prompt | self._llm | StrOutputParser()
         self._reranker = None
+        self._reranker_lock = threading.Lock()
 
     def _get_reranker(self):
-        """Load cross-encoder model lazily."""
+        """Load cross-encoder model lazily (thread-safe).
+
+        Double-checked locking so two concurrent first-time queries can't
+        both trigger a model load -- one loading it, the other discarding
+        its own redundant copy.
+        """
         if self._reranker is None:
-            logger.info("Loading Cross-Encoder reranker model (cross-encoder/ms-marco-MiniLM-L-6-v2)...")
-            from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-            logger.info("Cross-Encoder reranker loaded.")
+            with self._reranker_lock:
+                if self._reranker is None:
+                    logger.info(
+                        "Loading Cross-Encoder reranker model (cross-encoder/ms-marco-MiniLM-L-6-v2)..."
+                    )
+                    from sentence_transformers import CrossEncoder
+                    self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+                    logger.info("Cross-Encoder reranker loaded.")
         return self._reranker
 
     def answer(
@@ -192,13 +222,12 @@ class RAGPipeline:
                 reranker = self._get_reranker()
                 pairs = [[standalone_question, c.document.page_content] for c in chunks]
                 rerank_scores = reranker.predict(pairs)
-                
-                import math
+
                 for chunk, raw_score in zip(chunks, rerank_scores):
                     # Sigmoid function to map logit scores to [0, 1] range
                     sig_score = 1.0 / (1.0 + math.exp(-float(raw_score)))
                     chunk.score = round(sig_score, 4)
-                    
+
                 chunks = sorted(chunks, key=lambda x: x.score, reverse=True)
                 chunks = chunks[:k]
                 logger.info("Re-ranking complete. Retained top-%d chunks.", len(chunks))
@@ -220,7 +249,7 @@ class RAGPipeline:
                 raise LLMError(f"LLM failed to generate an answer: {exc}") from exc
 
             answer = answer.strip()
-            if answer == _NOT_FOUND_MESSAGE:
+            if _is_not_found(answer):
                 fallback_triggered = True
         else:
             answer = _NOT_FOUND_MESSAGE
@@ -232,7 +261,6 @@ class RAGPipeline:
                 search = DuckDuckGoSearchRun()
                 search_results = search.run(standalone_question)
 
-                from langchain_core.prompts import ChatPromptTemplate
                 web_prompt = ChatPromptTemplate.from_messages([
                     ("system", _WEB_SYSTEM_PROMPT),
                     ("human", _WEB_HUMAN_PROMPT)
@@ -242,19 +270,19 @@ class RAGPipeline:
                     "search_results": search_results,
                     "question": standalone_question
                 })
-                
+
                 logger.info("Generated answer from web search fallback.")
                 return RAGAnswer(
                     answer=web_answer.strip(),
                     chunks=[],
-                    confidence=0.4
+                    confidence=_WEB_FALLBACK_CONFIDENCE,
                 )
             except Exception as exc:
                 logger.warning("Web search fallback failed: %s", exc)
                 return RAGAnswer(
                     answer=_NOT_FOUND_MESSAGE,
                     chunks=[],
-                    confidence=0.0
+                    confidence=0.0,
                 )
 
         confidence = self._confidence(chunks)
@@ -278,8 +306,8 @@ class RAGPipeline:
             meta = chunk.document.metadata
             source = meta.get("source", "unknown")
             page = meta.get("page")
-            label = f"[Source {i}: {source}"
-            label += f", page {page}]" if page is not None else "]"
+            page_part = f", page {page}" if page is not None else ""
+            label = f"[Source {i}: {source}{page_part}]"
             blocks.append(f"{label}\n{chunk.document.page_content}")
         return "\n\n---\n\n".join(blocks)
 
@@ -295,3 +323,4 @@ class RAGPipeline:
         best = max(scores)
         mean_top = sum(top) / len(top)
         return round(0.5 * best + 0.5 * mean_top, 4)
+        

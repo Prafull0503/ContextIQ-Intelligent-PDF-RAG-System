@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.api.routes import router
 from app.core.config import get_settings
+from app.core.database import init_db
 from app.core.logging_config import configure_logging, get_logger
 from app.services.rag_service import get_rag_service
 from app.utils.exceptions import RAGError
@@ -33,13 +34,10 @@ async def lifespan(app: FastAPI):
         settings.llm_provider.value,
         settings.embedding_provider.value,
     )
-    
-    # Automatically bootstrap database tables (SQLite or PostgreSQL)
-    from sqlmodel import SQLModel
-    from app.core.database import engine
-    import app.models.schemas  # Force registration of SQLModel schemas
-    SQLModel.metadata.create_all(engine)
-    logger.info("Database tables verified/created.")
+
+    # Bootstrap database tables (SQLite or PostgreSQL). Uses the single
+    # shared init_db() so table-creation logic lives in exactly one place.
+    init_db()
 
     # Eagerly initialise embeddings + vector store (downloads local model once).
     get_rag_service()
@@ -61,6 +59,8 @@ def create_app() -> FastAPI:
     )
 
     # Permissive CORS for local development / demo front-ends.
+    # TODO: restrict allow_origins to known frontend domain(s) before a real
+    # production deployment.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -68,7 +68,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Single handler converts any domain error into a proper HTTP response.
+    # Domain errors (raised deliberately by the service layer) map to their
+    # declared status_code with a clean message.
     @app.exception_handler(RAGError)
     async def _rag_error_handler(_: Request, exc: RAGError) -> JSONResponse:
         logger.warning("%s -> %d: %s", type(exc).__name__, exc.status_code, exc.message)
@@ -76,5 +77,15 @@ def create_app() -> FastAPI:
             status_code=exc.status_code, content={"detail": exc.message}
         )
 
+    # Catch-all for anything unexpected (bugs, dependency failures, etc.) so
+    # the client always gets a clean JSON error instead of a raw traceback.
+    @app.exception_handler(Exception)
+    async def _unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled exception: %s", exc)
+        return JSONResponse(
+            status_code=500, content={"detail": "An unexpected error occurred."}
+        )
+
     app.include_router(router)
     return app
+    

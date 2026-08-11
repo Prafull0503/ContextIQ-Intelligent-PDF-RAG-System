@@ -1,4 +1,4 @@
-"""Pydantic schemas for API requests and responses.
+"""Pydantic schemas for API requests and responses, plus DB (SQLModel) tables.
 
 These models define the public contract of the API and provide automatic
 validation + OpenAPI documentation for free.
@@ -6,7 +6,11 @@ validation + OpenAPI documentation for free.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from datetime import datetime, timezone
+
+from pydantic import BaseModel, EmailStr, Field
+from sqlmodel import Field as SQLField
+from sqlmodel import SQLModel
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ class Message(BaseModel):
     """A single message in the conversation history."""
 
     role: str = Field(..., description="Role of the sender: 'user' or 'assistant'.", examples=["user"])
-    content: str = Field(..., description="Text content of the message.")
+    content: str = Field(..., max_length=8_000, description="Text content of the message.")
 
 
 class AskRequest(BaseModel):
@@ -66,6 +70,7 @@ class AskRequest(BaseModel):
     question: str = Field(
         ...,
         min_length=1,
+        max_length=2_000,
         description="Natural-language question to answer from the indexed PDFs.",
         examples=["What is this document about?"],
     )
@@ -77,7 +82,8 @@ class AskRequest(BaseModel):
     )
     history: list[Message] = Field(
         default_factory=list,
-        description="Conversation history of previous messages."
+        max_length=50,
+        description="Conversation history of previous messages (most recent last).",
     )
     selected_document: str | None = Field(
         default=None,
@@ -116,39 +122,46 @@ class ErrorResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# User & Auth Databases
+# User & Auth (DB table + API schemas)
 # ---------------------------------------------------------------------------
-from datetime import datetime
-from sqlmodel import SQLModel, Field as SQLField
-
 class User(SQLModel, table=True):
     """Database model for user records."""
+
     id: int | None = SQLField(default=None, primary_key=True)
     email: str = SQLField(unique=True, index=True, nullable=False)
     username: str = SQLField(default="", nullable=False)
     hashed_password: str = SQLField(nullable=False)
-    created_at: datetime = SQLField(default_factory=datetime.utcnow)
+    created_at: datetime = SQLField(default_factory=lambda: datetime.now(timezone.utc))
+
 
 class UserSignup(BaseModel):
     """Schema for registering a new user."""
-    email: str
-    password: str
-    username: str
+
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+    username: str = Field(..., min_length=1, max_length=64)
+
 
 class UserLogin(BaseModel):
     """Schema for authenticating a user."""
-    email: str
-    password: str
+
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=128)
+
 
 class TokenResponse(BaseModel):
     """Response containing JWT access token."""
+
     access_token: str
     token_type: str = "bearer"
     username: str = ""
 
+
 class UserResponse(BaseModel):
     """Public user response schema."""
+
     id: int
     email: str
     username: str
     created_at: datetime
+    

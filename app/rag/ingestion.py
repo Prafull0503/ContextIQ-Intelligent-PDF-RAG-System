@@ -26,6 +26,8 @@ from app.utils.text_cleaning import clean_text
 
 logger = get_logger(__name__)
 
+_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv"}
+
 
 @dataclass
 class IngestionResult:
@@ -68,7 +70,8 @@ class IngestionPipeline:
             An :class:`IngestionResult` summarising what was stored.
 
         Raises:
-            InvalidDocumentError: If the file cannot be parsed.
+            InvalidDocumentError: If the file's extension is unsupported or
+                the file cannot be parsed.
             EmptyDocumentError: If no usable text could be extracted.
         """
         logger.info("Ingestion started for '%s'", original_filename)
@@ -96,6 +99,12 @@ class IngestionPipeline:
     def _load(self, pdf_path: Path, filename: str) -> list[Document]:
         """Step 1: Load the document into per-page/per-section documents."""
         ext = pdf_path.suffix.lower()
+        if ext not in _SUPPORTED_EXTENSIONS:
+            raise InvalidDocumentError(
+                f"'{filename}' has an unsupported file extension '{ext}'. "
+                f"Supported types: {', '.join(sorted(_SUPPORTED_EXTENSIONS))}."
+            )
+
         try:
             if ext == ".pdf":
                 documents = PyPDFLoader(str(pdf_path)).load()
@@ -105,11 +114,9 @@ class IngestionPipeline:
             elif ext == ".txt":
                 from langchain_community.document_loaders import TextLoader
                 documents = TextLoader(str(pdf_path), encoding="utf-8").load()
-            elif ext == ".csv":
+            else:  # ".csv"
                 from langchain_community.document_loaders import CSVLoader
                 documents = CSVLoader(str(pdf_path)).load()
-            else:
-                raise ValueError(f"Unsupported file extension: {ext}")
         except Exception as exc:
             raise InvalidDocumentError(
                 f"'{filename}' could not be read as a valid document: {exc}"
@@ -131,7 +138,7 @@ class IngestionPipeline:
             cleaned.append(page)
 
         if not cleaned:
-            raise EmptyPDFError(
+            raise EmptyDocumentError(
                 f"'{filename}' has no extractable text (it may be a scanned "
                 "image-only PDF that requires OCR)."
             )
@@ -156,3 +163,4 @@ class IngestionPipeline:
 
         logger.info("Created %d chunk(s) for '%s'", len(chunks), filename)
         return chunks
+        

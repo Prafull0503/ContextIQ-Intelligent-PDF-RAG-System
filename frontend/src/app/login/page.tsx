@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { login, signup } from "@/lib/api";
 
+const MIN_PASSWORD_LENGTH = 8;
+
 export default function LoginPage() {
   const router = useRouter();
   const [isLogin, setIsLogin] = useState(true);
@@ -11,7 +13,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [username, setUsername] = useState("");
-  
+
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
@@ -19,18 +21,30 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  function switchMode(nextIsLogin: boolean) {
+    if (loading) return; // don't let the form change identity mid-request
+    setIsLogin(nextIsLogin);
+    setError(null);
+    setSuccessMessage(null);
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSuccessMessage(null);
-    setLoading(true);
 
-    if (!isLogin && password !== confirmPassword) {
-      setError("Passwords do not match");
-      setLoading(false);
-      return;
+    if (!isLogin) {
+      if (password !== confirmPassword) {
+        setError("Passwords do not match");
+        return;
+      }
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+        return;
+      }
     }
 
+    setLoading(true);
     try {
       if (isLogin) {
         await login(email, password);
@@ -70,12 +84,10 @@ export default function LoginPage() {
         {/* Tab Selector */}
         <div className="flex rounded-xl bg-white/[0.03] p-1 border border-white/5 mb-5">
           <button
-            onClick={() => {
-              setIsLogin(true);
-              setError(null);
-              setSuccessMessage(null);
-            }}
-            className={`flex-1 rounded-lg py-2 text-xs font-semibold transition cursor-pointer ${
+            type="button"
+            onClick={() => switchMode(true)}
+            disabled={loading}
+            className={`flex-1 rounded-lg py-2 text-xs font-semibold transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
               isLogin
                 ? "bg-white/[0.06] text-foreground border border-white/5"
                 : "text-foreground/45 hover:text-foreground/80"
@@ -84,12 +96,10 @@ export default function LoginPage() {
             Log In
           </button>
           <button
-            onClick={() => {
-              setIsLogin(false);
-              setError(null);
-              setSuccessMessage(null);
-            }}
-            className={`flex-1 rounded-lg py-2 text-xs font-semibold transition cursor-pointer ${
+            type="button"
+            onClick={() => switchMode(false)}
+            disabled={loading}
+            className={`flex-1 rounded-lg py-2 text-xs font-semibold transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
               !isLogin
                 ? "bg-white/[0.06] text-foreground border border-white/5"
                 : "text-foreground/45 hover:text-foreground/80"
@@ -108,6 +118,8 @@ export default function LoginPage() {
               </label>
               <input
                 type="text"
+                name="username"
+                autoComplete="username"
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -122,6 +134,8 @@ export default function LoginPage() {
             </label>
             <input
               type="email"
+              name="email"
+              autoComplete="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -137,7 +151,10 @@ export default function LoginPage() {
             <div className="relative">
               <input
                 type={showPassword ? "text" : "password"}
+                name="password"
+                autoComplete={isLogin ? "current-password" : "new-password"}
                 required
+                minLength={isLogin ? undefined : MIN_PASSWORD_LENGTH}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
@@ -152,6 +169,11 @@ export default function LoginPage() {
                 {showPassword ? <EyeOffIcon /> : <EyeIcon />}
               </button>
             </div>
+            {!isLogin && (
+              <p className="text-[10px] text-foreground/35 pl-1">
+                At least {MIN_PASSWORD_LENGTH} characters
+              </p>
+            )}
           </div>
 
           {/* Confirm Password (only on Signup mode) */}
@@ -163,6 +185,8 @@ export default function LoginPage() {
               <div className="relative">
                 <input
                   type={showConfirmPassword ? "text" : "password"}
+                  name="confirmPassword"
+                  autoComplete="new-password"
                   required
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}

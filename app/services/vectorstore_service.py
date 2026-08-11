@@ -17,6 +17,17 @@ from app.utils.exceptions import VectorStoreError
 
 logger = get_logger(__name__)
 
+# Reciprocal Rank Fusion constant. 60 is the standard value from the original
+# RRF paper (Cormack et al.) -- it dampens the impact of rank 1 vs rank 2
+# without needing per-corpus tuning.
+_RRF_K = 60.0
+
+# Baseline similarity assigned to chunks that only matched via BM25 keyword
+# search (no vector hit). Purely informational for downstream display /
+# reranking input -- the actual retrieval order is decided by RRF, not by
+# this number.
+_BM25_ONLY_BASELINE_SCORE = 0.5
+
 
 class VectorStoreService:
     """Thin, persistent wrapper around a LangChain Chroma collection."""
@@ -67,6 +78,19 @@ class VectorStoreService:
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
+    @staticmethod
+    def _build_filter(
+        filter_source: str | None, filter_user_id: int | None
+    ) -> dict | None:
+        """Build a Chroma ``where`` filter from the optional constraints."""
+        if filter_source and filter_user_id is not None:
+            return {"$and": [{"source": filter_source}, {"user_id": filter_user_id}]}
+        if filter_user_id is not None:
+            return {"user_id": filter_user_id}
+        if filter_source:
+            return {"source": filter_source}
+        return None
+
     def similarity_search(
         self, query: str, k: int, filter_source: str | None = None, filter_user_id: int | None = None
     ) -> list[tuple[Document, float]]:
@@ -81,17 +105,10 @@ class VectorStoreService:
         Returns:
             List of ``(Document, similarity_score)`` tuples, best first.
         """
+        search_filter = self._build_filter(filter_source, filter_user_id)
+
+        # 1. Vector search with score
         try:
-            # 1. Vector search with score
-            if filter_source and filter_user_id is not None:
-                search_filter = {"$and": [{"source": filter_source}, {"user_id": filter_user_id}]}
-            elif filter_user_id is not None:
-                search_filter = {"user_id": filter_user_id}
-            elif filter_source:
-                search_filter = {"source": filter_source}
-            else:
-                search_filter = None
-            
             vector_results = self._store.similarity_search_with_score(query, k=k, filter=search_filter)
         except Exception as exc:
             raise VectorStoreError(f"Vector similarity search failed: {exc}") from exc
@@ -102,27 +119,29 @@ class VectorStoreService:
             vector_ranked.append((doc, round(similarity, 4)))
 
         # 2. BM25 keyword search
+        # IMPORTANT: filter at the Chroma level (same `search_filter` used for
+        # vector search) rather than fetching the entire collection and
+        # filtering in Python. Without this, every single question would pull
+        # every chunk from every user into memory just to build a keyword
+        # index -- a full-collection scan on the hot path.
         bm25_ranked: list[Document] = []
         try:
-            db_docs_data = self._store.get(include=["documents", "metadatas"])
+            db_docs_data = self._store.get(
+                where=search_filter, include=["documents", "metadatas"]
+            )
             doc_texts = db_docs_data.get("documents", [])
             metadatas = db_docs_data.get("metadatas", [])
-            
+
             if doc_texts:
                 docs = [
                     Document(page_content=text, metadata=meta)
                     for text, meta in zip(doc_texts, metadatas)
                 ]
-                if filter_user_id is not None:
-                    docs = [d for d in docs if d.metadata and d.metadata.get("user_id") == filter_user_id]
-                if filter_source:
-                    docs = [d for d in docs if d.metadata and d.metadata.get("source") == filter_source]
-                
-                if docs:
-                    from langchain_community.retrievers import BM25Retriever
-                    bm25_retriever = BM25Retriever.from_documents(docs)
-                    bm25_retriever.k = k
-                    bm25_ranked = bm25_retriever.invoke(query)
+                from langchain_community.retrievers import BM25Retriever
+
+                bm25_retriever = BM25Retriever.from_documents(docs)
+                bm25_retriever.k = k
+                bm25_ranked = bm25_retriever.invoke(query)
         except Exception as exc:
             logger.warning("BM25 retrieval failed, falling back to vector search only: %s", exc)
 
@@ -135,7 +154,10 @@ class VectorStoreService:
             source = meta.get("source", "unknown")
             page = meta.get("page", 0)
             idx = meta.get("chunk_index", 0)
-            # Use content hash to distinguish duplicate indexing metadata
+            # Use content hash to distinguish duplicate indexing metadata.
+            # NOTE: this key only needs to be stable within a single call to
+            # this method (it's never persisted), so Python's per-process
+            # hash randomization is not a concern here.
             content_hash = hash(doc.page_content)
             return f"{source}_{page}_{idx}_{content_hash}"
 
@@ -143,22 +165,23 @@ class VectorStoreService:
         for rank, (doc, sim) in enumerate(vector_ranked, start=1):
             key = get_chunk_key(doc)
             doc_map[key] = (doc, sim)
-            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (60.0 + rank)
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
 
         # BM25 rankings contribution
         for rank, doc in enumerate(bm25_ranked, start=1):
             key = get_chunk_key(doc)
             if key not in doc_map:
-                # If only found in keyword search, assign a baseline similarity score
-                doc_map[key] = (doc, 0.5)
-            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (60.0 + rank)
+                doc_map[key] = (doc, _BM25_ONLY_BASELINE_SCORE)
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
 
         # Sort by RRF score descending
         sorted_keys = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
         scored = [doc_map[key] for key in sorted_keys[:k]]
 
-        logger.info("Hybrid search retrieved %d chunks for query (Vector count: %d, BM25 count: %d)",
-                    len(scored), len(vector_ranked), len(bm25_ranked))
+        logger.info(
+            "Hybrid search retrieved %d chunks for query (Vector count: %d, BM25 count: %d)",
+            len(scored), len(vector_ranked), len(bm25_ranked),
+        )
         return scored
 
     def count(self) -> int:
@@ -200,3 +223,4 @@ class VectorStoreService:
             return sorted(list(sources))
         except Exception as exc:
             raise VectorStoreError(f"Failed to list documents: {exc}") from exc
+            

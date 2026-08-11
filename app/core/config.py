@@ -11,7 +11,7 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,9 @@ class EmbeddingProvider(str, Enum):
     GEMINI = "gemini"
     HUGGINGFACE = "huggingface"
     OLLAMA = "ollama"
+
+
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 class Settings(BaseSettings):
@@ -82,9 +85,13 @@ class Settings(BaseSettings):
 
     # ---- Database & Auth ----
     database_url: str = "sqlite:///./data/sqlite.db"
-    jwt_secret_key: str = "contextiq_fallback_secure_secret_key_change_me_in_prod"
+    jwt_secret_key: str = Field(..., min_length=32)
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 1440
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
 
     @field_validator("chunk_overlap")
     @classmethod
@@ -93,6 +100,46 @@ class Settings(BaseSettings):
         if v >= chunk_size:
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
         return v
+
+    @field_validator("log_level")
+    @classmethod
+    def _log_level_must_be_valid(cls, v: str) -> str:
+        upper = v.upper()
+        if upper not in _VALID_LOG_LEVELS:
+            raise ValueError(
+                f"LOG_LEVEL must be one of {sorted(_VALID_LOG_LEVELS)}, got '{v}'"
+            )
+        return upper
+
+    @model_validator(mode="after")
+    def _api_key_required_for_selected_provider(self) -> "Settings":
+        """Fail fast at startup if the chosen provider has no matching key.
+
+        Ollama needs no key (it's local). OpenAI/Gemini providers for either
+        the LLM or the embedder require their respective key to be set.
+        """
+        needs_openai = self.llm_provider == LLMProvider.OPENAI or (
+            self.embedding_provider == EmbeddingProvider.OPENAI
+        )
+        needs_google = self.llm_provider == LLMProvider.GEMINI or (
+            self.embedding_provider == EmbeddingProvider.GEMINI
+        )
+
+        if needs_openai and not self.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is required when llm_provider or "
+                "embedding_provider is set to 'openai'."
+            )
+        if needs_google and not self.google_api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY is required when llm_provider or "
+                "embedding_provider is set to 'gemini'."
+            )
+        return self
+
+    # ------------------------------------------------------------------
+    # Derived paths
+    # ------------------------------------------------------------------
 
     @property
     def chroma_db_path_resolved(self) -> Path:
@@ -114,3 +161,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached ``Settings`` instance (singleton for the process)."""
     return Settings()
+    
